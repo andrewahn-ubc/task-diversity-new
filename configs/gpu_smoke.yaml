@@ -1,0 +1,35 @@
+extends: experiment.yaml
+
+# Compile and execute exactly one production-shaped PPO+CBP update.  Unlike
+# smoke.yaml (which is deliberately tiny for local tests), this gate retains
+# the production environment count, rollout length, network widths, epochs,
+# and minibatches so an A100/H100 memory or compilation failure is caught
+# before the 50-stream array is released.
+TOTAL_TIMESTEPS: 262144
+REW_SHAPING_HORIZON: 0
+NUM_SEEDS: 1
+WANDB_MODE: "disabled"
+DISABLE_WANDB: true
+DISABLE_VIZ: true
+DISABLE_EVAL: true
+DISABLE_ASYNC_EVAL: true
+
+experiment:
+  num_distributions: 1
+  diversity_levels: [1]
+  methods: [ppo_cbp]
+  ambiguity_resolution: "Production-shape, one-update GPU compatibility gate."
+  adaptation:
+    enabled: false
+    after_distributions: []
+
+derived_expectations:
+  updates_per_distribution: 1
+  optimizer_steps_per_distribution: 8
+  consumed_timesteps_per_distribution: 262144
+  timestep_remainder_per_distribution: 0
+  total_training_updates_per_stream: 1
+  total_training_optimizer_steps_per_stream: 8
+  adaptation_probe_count: 0
+  updates_per_adaptation_probe: 0
+  optimizer_steps_per_adaptation_probe: 0

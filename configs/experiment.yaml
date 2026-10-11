@@ -1,0 +1,58 @@
+extends: source_hyperparameters.yaml
+
+# Environment-only compatibility overrides.  The supplied YAML names a private
+# TwoAgentsGridWorld that is not part of either requested public repository.
+# Figure 6 instead uses the released single-agent, depth-6 Banyan protocol and
+# hides the task rules.  All PPO optimization/batching hyperparameters below
+# remain inherited verbatim from the supplied YAML.
+TREE_DEPTH: 6
+INCLUDE_RULES_IN_OBS: false
+
+architecture:
+  # PureJaxRL's recurrent PPO has one shared input FC and one FC in each head.
+  # Output projections to logits/value are not counted as hidden FC layers.
+  shared_pre_gru_fc_layers: 1
+  actor_head_fc_layers: 1
+  critic_head_fc_layers: 1
+
+experiment:
+  # The attached source names TwoAgentsGridWorld, but that name is retained
+  # only as provenance. The runnable protocol uses the released single-agent
+  # Banyan environment, so each vectorized environment contributes one actor.
+  num_agents: 1
+  num_distributions: 7
+  diversity_levels: [1, 16, 256, 4096, 65536] # {1^2, 4^2, 16^2, 64^2, 256^2}
+  methods: [ppo, ppo_cbp]
+
+  # The request first changes Figure 6 from 10 to 7 training distributions,
+  # but later asks for probes after each of the 10 distributions. We resolve
+  # that conflict in favor of the explicit modification: probe after each of
+  # all seven distributions.
+  ambiguity_resolution: >-
+    Use seven training distributions and branch an adaptation probe after
+    each of distributions 1 through 7; the later reference to 10 is treated
+    as inherited wording from the original experiment.
+
+  adaptation:
+    enabled: true
+    after_distributions: [1, 2, 3, 4, 5, 6, 7]
+    additional_timesteps: 100000000
+    heldout_tasks: 20
+    heldout_task_seed: 1729
+    fixed_across_distributions: true
+    fixed_across_diversity_streams: true
+    require_disjoint_from_training: true
+    discard_branch_updates: true
+
+# These assertions make accidental changes to batching or step-count semantics
+# fail at load time rather than silently changing the experiment budget.
+derived_expectations:
+  updates_per_distribution: 381
+  optimizer_steps_per_distribution: 3048
+  consumed_timesteps_per_distribution: 99876864
+  timestep_remainder_per_distribution: 123136
+  total_training_updates_per_stream: 2667
+  total_training_optimizer_steps_per_stream: 21336
+  adaptation_probe_count: 7
+  updates_per_adaptation_probe: 381
+  optimizer_steps_per_adaptation_probe: 3048

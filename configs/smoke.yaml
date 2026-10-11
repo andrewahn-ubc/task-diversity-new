@@ -1,0 +1,40 @@
+extends: experiment.yaml
+
+NUM_ENVS: 4
+NUM_STEPS: 8
+MAX_STEPS: 16
+UPDATE_EPOCHS: 1
+NUM_MINIBATCHES: 2
+TOTAL_TIMESTEPS: 256
+REW_SHAPING_HORIZON: 128
+FC_DIM_SIZE: 32
+GRU_HIDDEN_DIM: 16
+RULESET_EMBED_DIM: 8
+EMBED_DIM: 16
+NUM_SEEDS: 1
+WANDB_MODE: "disabled"
+DISABLE_WANDB: True
+DISABLE_VIZ: True
+DISABLE_EVAL: True
+DISABLE_ASYNC_EVAL: True
+
+experiment:
+  num_distributions: 2
+  diversity_levels: [1]
+  methods: [ppo, ppo_cbp]
+  ambiguity_resolution: "Smoke-only reduction to two distributions."
+  adaptation:
+    after_distributions: [1, 2]
+    additional_timesteps: 128
+    heldout_tasks: 2
+
+derived_expectations:
+  updates_per_distribution: 8
+  optimizer_steps_per_distribution: 16
+  consumed_timesteps_per_distribution: 256
+  timestep_remainder_per_distribution: 0
+  total_training_updates_per_stream: 16
+  total_training_optimizer_steps_per_stream: 32
+  adaptation_probe_count: 2
+  updates_per_adaptation_probe: 4
+  optimizer_steps_per_adaptation_probe: 8

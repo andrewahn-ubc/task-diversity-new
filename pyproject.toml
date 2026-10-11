@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "task-diversity-2"
+version = "0.1.0"
+description = "Continual reinforcement-learning experiments for task diversity and plasticity"
+requires-python = ">=3.13"
+dependencies = [
+  "jax==0.11.0",
+  "flax==0.12.8",
+  "numpy==2.5.1",
+  "PyYAML==6.0.3",
+  "matplotlib==3.11.1",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8.3,<9",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+pythonpath = ["src"]
+testpaths = ["tests"]

@@ -1,0 +1,78 @@
+"ENV_NAME": "TwoAgentsGridWorld"
+
+# ruleset
+"TREE_DEPTH": 4
+"RULESET_BASE_SEED": 0
+"USE_RULESET_DATASET": True
+"RULESET_DATASET_FILE": "curriculum_d1-2-3_n10210_ps20_bs0_rs12345"
+"AUTO_GENERATE_DATASET_IF_MISSING": True
+"DATASET_GEN_CHUNK": 200000
+"DATASET_GENERATION_PYTHON_EXEC": null
+"DATASET_GENERATION_DRY_RUN": False
+"USE_DATASET_DISTRACTORS": True
+"DISTRACTOR_COMBINE_PENALTY": -0.1
+"BALANCED_DEPTH_SAMPLING": True
+"ENV_STRUCTURE_SAMPLE": False
+"ENV_STRUCTURE_PROB": 0
+"ENV_STRUCTURE_TYPES": null # null -> use SAMPLE/PROB; [] or ["none"] -> no structure
+# When set, a structure type is sampled uniformly from this list per reset.
+# Examples:
+#   ["block"] -> moveable block only
+#   ["door"] -> door+lever only
+#   ["door_block"] -> composite: item behind door, lever behind block
+#   ["door", "block"] -> mixed single-structure
+#   ["door", "block", "door_block"] -> all combos
+#   ["none", "door", "block"] -> allow no-structure as a choice
+"SLOW_TILE_PROB": 0 # fraction of open tiles to mark as slow when env structure is active
+"INCLUDE_RULES_IN_OBS": True # if False, only goal vector is included (no ruleset encoding)
+"RULESET_EMBED_DIM": 128
+"RULESET_EMBED_MODE": "concat" # "concat", "replace", or "structured" (structured: f_object + f_rule → MLP → sum)
+
+"LR": 0.00030 # so important tos earch as - A
+"ANNEAL_LR": True
+"LR_WARMUP": 0.05
+
+"NUM_ENVS": 2048
+"NUM_STEPS": 128
+"MAX_STEPS": 256
+"UPDATE_EPOCHS": 2
+"NUM_MINIBATCHES": 4
+
+"TOTAL_TIMESTEPS": 1e8
+"REW_SHAPING_HORIZON": 4e7
+
+"FC_DIM_SIZE": 1024 # try [512, 1024] - B
+"GRU_HIDDEN_DIM": 256 # [128, 256] - B (also used for LSTM hidden dim)
+"RNN_TYPE": "GRU" # "GRU" or "LSTM" - LSTM has better long-term memory for multi-step tasks
+"ACTOR_CLIP_EPS": 0.2 # policy ratio clip (a.k.a. policy/actor clip range)
+"VALUE_CLIP_EPS": 10.0 # SEARCH OVER THIS -- INCREASE. SEPARATE OUT VALUE + ACTOR CLIP EPS IN IPPO FILE. Our setting is way more complex that OV
+"ENT_COEF": 0.05 # SEARCH OVER THIS TOO, use log scale
+"GAMMA": 0.99
+"GAE_LAMBDA": 0.8 # search this as well. maybe go down .6
+"SCALE_CLIP_EPS": False
+"VF_COEF": 0.8 # SEARCH OVER THIS TOO, WITH CLIP EPS, []
+"MAX_GRAD_NORM": 0.5
+"ACTIVATION": "relu"
+"SEED": 0
+"NUM_SEEDS": 5
+"EMBEDDING": float
+"EMBED_DIM": 512
+"ENTITY": "purabseth"
+"PROJECT": "jaxmarl"
+"WANDB_MODE": "online"
+
+# ================ PROFILING OPTIONS ================
+# Step 1: Timing - measure sec/update over chunks
+"TIMING_CHUNK_SIZE": 200 # measure timing every N updates
+
+# Step 2: Disable nonessential features for profiling
+# Set any of these to True to disable that feature
+"DISABLE_WANDB": False # disable all wandb logging
+"DISABLE_VIZ": False # disable viz_callback (frame galleries, etc.)
+"DISABLE_EVAL": False # disable periodic eval callback
+"DISABLE_ASYNC_EVAL": True # disable async ruleset eval only
+"DISABLE_ALL_CALLBACKS": False # master switch: disables all of the above
+
+# Step 3: Skip expensive per-step diagnostics for max speed
+# When True, skips: success rate, depth masks, structure detection (~30% faster trajectory)
+"SKIP_STEP_DIAGNOSTICS": False

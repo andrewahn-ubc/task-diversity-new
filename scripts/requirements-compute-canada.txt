@@ -1,0 +1,18 @@
+# Runtime versions are matched to the pinned Banyan source revision used by
+# this project.  JAX's cuda12 extra installs NVIDIA user-space libraries in the
+# virtual environment; do not load a CUDA or cuDNN module in Slurm jobs.
+jax[cuda12]==0.11.0
+flax==0.12.8
+optax==0.2.8
+chex==0.1.92
+numpy==2.5.1
+PyYAML==6.0.3
+matplotlib==3.11.1
+wandb==0.28.1
+wrapt==1.17.3
+
+# Make local wheel builds independent of whatever happens to be installed in
+# the Alliance Python module at setup time.
+pip==25.2
+setuptools==80.9.0
+wheel==0.45.1
