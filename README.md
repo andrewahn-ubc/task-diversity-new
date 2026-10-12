@@ -276,8 +276,9 @@ mid-stage stop followed by resume produced exactly the same decoded learner
 state and all 16 metric rows as an uninterrupted run. A complete synthetic
 result matrix exercised every plotting output.
 
-The cluster smoke gate additionally checks exact package versions, imports the
-pinned Banyan modules under Alliance Python 3.13.2, forces a CUDA matrix
+The cluster smoke gate additionally checks pinned PEP 440 public package
+versions (while accepting Alliance's `+computecanada` local wheel label),
+imports the pinned Banyan modules under Alliance Python 3.13.2, forces a CUDA matrix
 operation, then compiles and executes one PPO+CBP update with the full
 production shapes (2048 environments, 128 steps, FC 1024, GRU 256). It reloads
 the resulting checkpoint and verifies the immutable stage marker before the

@@ -7,6 +7,9 @@ import argparse
 import importlib.metadata
 import sys
 
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
+from packaging.version import InvalidVersion
+
 
 EXPECTED = {
     "jax": "0.11.0",
@@ -17,6 +20,15 @@ EXPECTED = {
     "numpy": "2.5.1",
     "PyYAML": "6.0.3",
 }
+
+
+def _matches_expected_version(actual: str, expected: str) -> bool:
+    """Match pip's PEP 440 ``==`` behavior, including local wheel labels."""
+
+    try:
+        return SpecifierSet(f"=={expected}").contains(actual, prereleases=True)
+    except (InvalidSpecifier, InvalidVersion):
+        return False
 
 
 def main() -> int:
@@ -30,7 +42,7 @@ def main() -> int:
     mismatches = []
     for package, expected in EXPECTED.items():
         actual = importlib.metadata.version(package)
-        if actual != expected:
+        if not _matches_expected_version(actual, expected):
             mismatches.append(f"{package}={actual} (expected {expected})")
     if mismatches:
         raise RuntimeError("runtime version mismatch: " + ", ".join(mismatches))
