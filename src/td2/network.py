@@ -1,7 +1,8 @@
 """Recurrent actor-critic used by the continual Banyan experiments.
 
-This is a forward port of the network shape in PureJaxRL's ``ppo_rnn.py``
-(commit 31756b197773a52db763fdbe6d635e4b46522a73).  The implementation is
+The topology matches the supplied authors' implementation: a 512-dimensional
+float embedding, a linear projection to the recurrent width, a GRU, and two
+1024-dimensional hidden layers in each output head.  The implementation is
 deliberately explicit rather than using ``flax.linen.GRUCell`` so continual
 backprop can replace well-defined rows and columns of every recurrent matrix.
 """
@@ -13,7 +14,12 @@ from typing import Mapping
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
-from flax.linen.initializers import constant, lecun_normal, orthogonal
+from flax.linen.initializers import (
+    constant,
+    lecun_normal,
+    orthogonal,
+    variance_scaling,
+)
 
 
 Array = jax.Array
@@ -78,16 +84,15 @@ class ManualGRU(nn.Module):
 
 
 class ActorCriticRNN(nn.Module):
-    """Shared recurrent body with one hidden layer in each output head.
+    """Authors' recurrent actor-critic topology, adapted to one agent.
 
-    The FC depth is the closest faithful generalization of PureJaxRL: one
-    observation embedding before the GRU and one hidden FC in each actor and
-    critic head.  The previous-action one-hot is appended after that embedding,
-    following the recurrent-state definition in the paper.  A separate rule
-    encoder is used only when the YAML-requested rule observations are present.
+    A separate rule encoder remains available only when rule observations are
+    enabled.  The production experiment hides rules, as specified by its
+    single-agent Figure-6 protocol.
     """
 
     action_dim: int
+    embedding_dim: int
     fc_dim: int
     gru_hidden_dim: int
     activation: str = "relu"
@@ -99,7 +104,6 @@ class ActorCriticRNN(nn.Module):
         self,
         hidden: Array,
         obs: Array,
-        previous_actions: Array,
         resets: Array,
     ) -> tuple[Array, Array, Array, Mapping[str, Array]]:
         activate = _activation(self.activation)
@@ -119,57 +123,74 @@ class ActorCriticRNN(nn.Module):
             obs = jnp.concatenate((base_obs, rule_embedding), axis=-1)
 
         embedding = nn.Dense(
-            self.fc_dim,
-            kernel_init=orthogonal(jnp.sqrt(2.0)),
+            self.embedding_dim,
+            kernel_init=variance_scaling(
+                scale=1.0, mode="fan_in", distribution="uniform"
+            ),
             bias_init=constant(0.0),
             name="obs_embed",
         )(obs)
         embedding = activate(embedding)
         activations["obs_embed"] = embedding
 
-        # The paper's recurrent policy conditions on the current observation
-        # and previous action.  A zero vector is the episode-start sentinel;
-        # mask here as well as in the runner so replayed trajectories cannot
-        # accidentally carry a terminal action across an episode boundary.
-        previous_actions = jnp.where(
-            resets[..., None], jnp.zeros_like(previous_actions), previous_actions
-        )
-        recurrent_input = jnp.concatenate((embedding, previous_actions), axis=-1)
+        recurrent_input = nn.Dense(
+            self.gru_hidden_dim,
+            kernel_init=lecun_normal(),
+            bias_init=constant(0.0),
+            name="rnn_input",
+        )(embedding)
+        activations["rnn_input"] = recurrent_input
 
         hidden, memory = ManualGRU(self.gru_hidden_dim, name="gru")(
             hidden, recurrent_input, resets
         )
         activations["gru"] = memory
 
-        actor_hidden = nn.Dense(
+        actor_hidden_1 = nn.Dense(
             self.fc_dim,
             kernel_init=orthogonal(2.0),
             bias_init=constant(0.0),
-            name="actor_hidden",
+            name="actor_hidden_1",
         )(memory)
-        actor_hidden = activate(actor_hidden)
-        activations["actor_hidden"] = actor_hidden
+        actor_hidden_1 = activate(actor_hidden_1)
+        activations["actor_hidden_1"] = actor_hidden_1
+        actor_hidden_2 = nn.Dense(
+            self.fc_dim,
+            kernel_init=orthogonal(2.0),
+            bias_init=constant(0.0),
+            name="actor_hidden_2",
+        )(actor_hidden_1)
+        actor_hidden_2 = activate(actor_hidden_2)
+        activations["actor_hidden_2"] = actor_hidden_2
         logits = nn.Dense(
             self.action_dim,
             kernel_init=orthogonal(0.01),
             bias_init=constant(0.0),
             name="actor_out",
-        )(actor_hidden)
+        )(actor_hidden_2)
 
-        critic_hidden = nn.Dense(
+        critic_hidden_1 = nn.Dense(
             self.fc_dim,
             kernel_init=orthogonal(2.0),
             bias_init=constant(0.0),
-            name="critic_hidden",
+            name="critic_hidden_1",
         )(memory)
-        critic_hidden = activate(critic_hidden)
-        activations["critic_hidden"] = critic_hidden
+        critic_hidden_1 = activate(critic_hidden_1)
+        activations["critic_hidden_1"] = critic_hidden_1
+        critic_hidden_2 = nn.Dense(
+            self.fc_dim,
+            kernel_init=orthogonal(2.0),
+            bias_init=constant(0.0),
+            name="critic_hidden_2",
+        )(critic_hidden_1)
+        critic_hidden_2 = activate(critic_hidden_2)
+        activations["critic_hidden_2"] = critic_hidden_2
         value = nn.Dense(
             1,
-            kernel_init=orthogonal(1.0),
+            kernel_init=orthogonal(0.01),
             bias_init=constant(0.0),
             name="critic_out",
-        )(critic_hidden)
+        )(critic_hidden_2)
 
         return hidden, logits, jnp.squeeze(value, axis=-1), activations
 

@@ -12,7 +12,9 @@ as the provenance for the JAX reimplementation and is not needed at runtime.
 - Revision: `31756b197773a52db763fdbe6d635e4b46522a73`
 - License: Apache License 2.0
 - Use here: recurrent PPO rollout, GAE, recurrent trajectory minibatching,
-  clipped PPO loss, initialization, and update structure, ported for Banyan.
+  clipped PPO loss, and update structure, ported for Banyan. The network
+  topology and initialization follow the implementation separately supplied
+  by the experiment's authors.
 
 Copyright and license terms remain those stated by the PureJaxRL project. The
 Apache License 2.0 text is available at

@@ -47,9 +47,12 @@ def _layer_widths(params) -> dict[str, int]:
     p = unfreeze(params)
     widths = {
         "obs_embed": int(p["obs_embed"]["bias"].shape[0]),
+        "rnn_input": int(p["rnn_input"]["bias"].shape[0]),
         "gru": int(p["gru"]["b_r"].shape[0]),
-        "actor_hidden": int(p["actor_hidden"]["bias"].shape[0]),
-        "critic_hidden": int(p["critic_hidden"]["bias"].shape[0]),
+        "actor_hidden_1": int(p["actor_hidden_1"]["bias"].shape[0]),
+        "actor_hidden_2": int(p["actor_hidden_2"]["bias"].shape[0]),
+        "critic_hidden_1": int(p["critic_hidden_1"]["bias"].shape[0]),
+        "critic_hidden_2": int(p["critic_hidden_2"]["bias"].shape[0]),
     }
     if "rule_encoder" in p:
         widths["rule_encoder"] = int(p["rule_encoder"]["bias"].shape[0])
@@ -82,12 +85,10 @@ def outgoing_weight_magnitude(params, layer_name: str) -> Array:
         start = p["obs_embed"]["kernel"].shape[0] - width
         return _mean_abs_rows(p["obs_embed"]["kernel"][start:, :])
     if layer_name == "obs_embed":
-        # The GRU input appends a non-learned previous-action one-hot after the
-        # observation embedding.  Only the leading embedding rows are outgoing
-        # weights of replaceable observation features.
-        width = p["obs_embed"]["bias"].shape[0]
+        return _mean_abs_rows(p["rnn_input"]["kernel"])
+    if layer_name == "rnn_input":
         return sum(
-            _mean_abs_rows(p["gru"][name][:width, :])
+            _mean_abs_rows(p["gru"][name])
             for name in ("x_r", "x_z", "x_n")
         )
     if layer_name == "gru":
@@ -96,12 +97,16 @@ def outgoing_weight_magnitude(params, layer_name: str) -> Array:
         )
         return (
             recurrent
-            + _mean_abs_rows(p["actor_hidden"]["kernel"])
-            + _mean_abs_rows(p["critic_hidden"]["kernel"])
+            + _mean_abs_rows(p["actor_hidden_1"]["kernel"])
+            + _mean_abs_rows(p["critic_hidden_1"]["kernel"])
         )
-    if layer_name == "actor_hidden":
+    if layer_name == "actor_hidden_1":
+        return _mean_abs_rows(p["actor_hidden_2"]["kernel"])
+    if layer_name == "actor_hidden_2":
         return _mean_abs_rows(p["actor_out"]["kernel"])
-    if layer_name == "critic_hidden":
+    if layer_name == "critic_hidden_1":
+        return _mean_abs_rows(p["critic_hidden_2"]["kernel"])
+    if layer_name == "critic_hidden_2":
         return _mean_abs_rows(p["critic_out"]["kernel"])
     raise KeyError(layer_name)
 
@@ -240,26 +245,27 @@ def _replace_rule_encoder(p, masks, replace: Array, mean: Array, key: Array) -> 
     _mark(masks, "obs_embed", "bias", jnp.any(local_mask, axis=0))
 
 
-def _replace_obs_embedding(p, masks, replace: Array, mean: Array, keys: list[Array]) -> None:
-    incoming = p["obs_embed"]["kernel"]
-    fresh = _kaiming_uniform(keys[0], incoming.shape, replace)
+def _replace_rnn_input(
+    p, masks, replace: Array, mean: Array, keys: list[Array]
+) -> None:
+    """Replace linear pre-GRU features and disconnect their GRU outputs."""
+
+    incoming = p["rnn_input"]["kernel"]
+    fresh = _lecun_normal(keys[0], incoming.shape, replace)
     in_mask = jnp.broadcast_to(replace[None, :], incoming.shape)
-    p["obs_embed"]["kernel"] = jnp.where(in_mask, fresh, incoming)
-    p["obs_embed"]["bias"] = jnp.where(replace, 0.0, p["obs_embed"]["bias"])
-    _mark(masks, "obs_embed", "kernel", in_mask)
-    _mark(masks, "obs_embed", "bias", replace)
+    p["rnn_input"]["kernel"] = jnp.where(in_mask, fresh, incoming)
+    p["rnn_input"]["bias"] = jnp.where(
+        replace, 0.0, p["rnn_input"]["bias"]
+    )
+    _mark(masks, "rnn_input", "kernel", in_mask)
+    _mark(masks, "rnn_input", "bias", replace)
 
     for gate in ("r", "z", "n"):
         name = f"x_{gate}"
         outgoing = p["gru"][name]
-        width = replace.shape[0]
-        local_mask = jnp.broadcast_to(replace[:, None], (width, outgoing.shape[1]))
-        out_mask = jnp.zeros_like(outgoing, dtype=jnp.bool_).at[:width, :].set(
-            local_mask
-        )
-        local_outgoing = outgoing[:width, :]
+        out_mask = jnp.broadcast_to(replace[:, None], outgoing.shape)
         compensation = jnp.sum(
-            jnp.where(local_mask, local_outgoing * mean[:, None], 0.0), axis=0
+            jnp.where(out_mask, outgoing * mean[:, None], 0.0), axis=0
         )
         p["gru"][f"b_{gate}"] = p["gru"][f"b_{gate}"] + compensation
         p["gru"][name] = jnp.where(out_mask, 0.0, outgoing)
@@ -305,7 +311,7 @@ def _replace_gru(p, masks, replace: Array, mean: Array, keys: list[Array]) -> No
             p["gru"]["b_n"] = jnp.where(replace, 0.0, p["gru"]["b_n"])
             _mark(masks, "gru", "b_n", replace)
 
-    for dest in ("actor_hidden", "critic_hidden"):
+    for dest in ("actor_hidden_1", "critic_hidden_1"):
         outgoing = p[dest]["kernel"]
         out_mask = jnp.broadcast_to(replace[:, None], outgoing.shape)
         compensation = jnp.sum(
@@ -344,16 +350,20 @@ def _enforce_replacement_invariants(
         p["rule_encoder"]["bias"] = jnp.where(
             replace, 0.0, p["rule_encoder"]["bias"]
         )
-    p["obs_embed"]["bias"] = jnp.where(
-        unit_replacements["obs_embed"], 0.0, p["obs_embed"]["bias"]
-    )
+    for module in (
+        "obs_embed",
+        "rnn_input",
+        "actor_hidden_1",
+        "actor_hidden_2",
+        "critic_hidden_1",
+        "critic_hidden_2",
+    ):
+        p[module]["bias"] = jnp.where(
+            unit_replacements[module], 0.0, p[module]["bias"]
+        )
     for name in ("b_r", "b_z", "b_n", "b_hn"):
         p["gru"][name] = jnp.where(
             unit_replacements["gru"], 0.0, p["gru"][name]
-        )
-    for module in ("actor_hidden", "critic_hidden"):
-        p[module]["bias"] = jnp.where(
-            unit_replacements[module], 0.0, p[module]["bias"]
         )
 
     if "rule_encoder" in unit_replacements:
@@ -365,13 +375,23 @@ def _enforce_replacement_invariants(
             jnp.where(replace[:, None], 0.0, local)
         )
 
-    replace = unit_replacements["obs_embed"]
+    for source, destination in (
+        ("obs_embed", "rnn_input"),
+        ("actor_hidden_1", "actor_hidden_2"),
+        ("actor_hidden_2", "actor_out"),
+        ("critic_hidden_1", "critic_hidden_2"),
+        ("critic_hidden_2", "critic_out"),
+    ):
+        replace = unit_replacements[source]
+        p[destination]["kernel"] = jnp.where(
+            replace[:, None], 0.0, p[destination]["kernel"]
+        )
+
+    replace = unit_replacements["rnn_input"]
     for gate in ("r", "z", "n"):
         name = f"x_{gate}"
-        width = replace.shape[0]
-        embedding_rows = p["gru"][name][:width, :]
-        p["gru"][name] = p["gru"][name].at[:width, :].set(
-            jnp.where(replace[:, None], 0.0, embedding_rows)
+        p["gru"][name] = jnp.where(
+            replace[:, None], 0.0, p["gru"][name]
         )
 
     replace = unit_replacements["gru"]
@@ -380,16 +400,7 @@ def _enforce_replacement_invariants(
         p["gru"][name] = jnp.where(
             replace[:, None], 0.0, p["gru"][name]
         )
-    for destination in ("actor_hidden", "critic_hidden"):
-        p[destination]["kernel"] = jnp.where(
-            replace[:, None], 0.0, p[destination]["kernel"]
-        )
-
-    for source, destination in (
-        ("actor_hidden", "actor_out"),
-        ("critic_hidden", "critic_out"),
-    ):
-        replace = unit_replacements[source]
+    for destination in ("actor_hidden_1", "critic_hidden_1"):
         p[destination]["kernel"] = jnp.where(
             replace[:, None], 0.0, p[destination]["kernel"]
         )
@@ -443,24 +454,54 @@ def apply_continual_backprop(
         if name == "rule_encoder":
             _replace_rule_encoder(p, masks, replace, corrected_mean, keys[0])
         elif name == "obs_embed":
-            _replace_obs_embedding(p, masks, replace, corrected_mean, keys)
-        elif name == "gru":
-            _replace_gru(p, masks, replace, corrected_mean, keys)
-        elif name == "actor_hidden":
             _replace_dense_hidden(
                 p,
                 masks,
-                module="actor_hidden",
+                module="obs_embed",
+                outgoing_module="rnn_input",
+                replace=replace,
+                mean=corrected_mean,
+                key=keys[0],
+            )
+        elif name == "rnn_input":
+            _replace_rnn_input(p, masks, replace, corrected_mean, keys)
+        elif name == "gru":
+            _replace_gru(p, masks, replace, corrected_mean, keys)
+        elif name == "actor_hidden_1":
+            _replace_dense_hidden(
+                p,
+                masks,
+                module="actor_hidden_1",
+                outgoing_module="actor_hidden_2",
+                replace=replace,
+                mean=corrected_mean,
+                key=keys[0],
+            )
+        elif name == "actor_hidden_2":
+            _replace_dense_hidden(
+                p,
+                masks,
+                module="actor_hidden_2",
                 outgoing_module="actor_out",
                 replace=replace,
                 mean=corrected_mean,
                 key=keys[0],
             )
-        elif name == "critic_hidden":
+        elif name == "critic_hidden_1":
             _replace_dense_hidden(
                 p,
                 masks,
-                module="critic_hidden",
+                module="critic_hidden_1",
+                outgoing_module="critic_hidden_2",
+                replace=replace,
+                mean=corrected_mean,
+                key=keys[0],
+            )
+        elif name == "critic_hidden_2":
+            _replace_dense_hidden(
+                p,
+                masks,
+                module="critic_hidden_2",
                 outgoing_module="critic_out",
                 replace=replace,
                 mean=corrected_mean,

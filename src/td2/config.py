@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from math import ceil, isfinite
+from math import isfinite
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -156,6 +156,7 @@ class DerivedConfig:
     adaptation_per_probe: RunSchedule | None
     total_training_updates_per_stream: int
     total_training_optimizer_steps_per_stream: int
+    total_training_warmup_optimizer_steps_per_stream: int
     adaptation_probe_count: int
 
 
@@ -398,7 +399,7 @@ def _build_config(data: Mapping[str, Any], source_files: tuple[Path, ...]) -> TD
         ),
         recurrent_type=_choice(data["RNN_TYPE"], "RNN_TYPE", {"GRU", "LSTM"}),
         activation=_choice(data["ACTIVATION"], "ACTIVATION", {"relu", "tanh"}),
-        embedding_type=_as_str(data["EMBEDDING"], "EMBEDDING"),
+        embedding_type=_choice(data["EMBEDDING"], "EMBEDDING", {"float"}),
         embedding_dim=_positive_int(data["EMBED_DIM"], "EMBED_DIM"),
     )
 
@@ -429,11 +430,11 @@ def _build_config(data: Mapping[str, Any], source_files: tuple[Path, ...]) -> TD
             "architecture.critic_head_fc_layers",
         ),
     )
-    expected_depth = ArchitectureConfig(1, 1, 1)
+    expected_depth = ArchitectureConfig(2, 2, 2)
     if architecture != expected_depth:
         raise ConfigurationError(
-            "this implementation fixes the PureJaxRL architecture at one shared "
-            "pre-GRU FC and one FC in each actor/critic head"
+            "this implementation matches the supplied authors' architecture at "
+            "two shared pre-GRU FCs and two FCs in each actor/critic head"
         )
 
     runtime = RuntimeConfig(
@@ -579,6 +580,14 @@ def _build_config(data: Mapping[str, Any], source_files: tuple[Path, ...]) -> TD
         total_training_optimizer_steps_per_stream=(
             training_schedule.total_optimizer_steps * experiment.num_distributions
         ),
+        total_training_warmup_optimizer_steps_per_stream=(
+            int(
+                training_schedule.num_updates
+                * experiment.num_distributions
+                * ppo.learning_rate_warmup_fraction
+            )
+            * training_schedule.optimizer_steps_per_update
+        ),
         adaptation_probe_count=len(adaptation.after_distributions)
         if adaptation.enabled
         else 0,
@@ -626,10 +635,11 @@ def _derive_schedule(
 
     optimizer_steps_per_update = ppo.update_epochs * ppo.num_minibatches
     total_optimizer_steps = num_updates * optimizer_steps_per_update
+    # Match the authors' schedule exactly: truncate the warmup in PPO-update
+    # units first, then convert that boundary to optimizer/minibatch steps.
     warmup_optimizer_steps = (
-        ceil(total_optimizer_steps * ppo.learning_rate_warmup_fraction)
-        if ppo.learning_rate_warmup_fraction
-        else 0
+        int(num_updates * ppo.learning_rate_warmup_fraction)
+        * optimizer_steps_per_update
     )
     return RunSchedule(
         requested_timesteps=requested_timesteps,
@@ -688,13 +698,16 @@ def _validate_derived_expectations(
         {
             "updates_per_distribution",
             "optimizer_steps_per_distribution",
+            "warmup_optimizer_steps_per_distribution",
             "consumed_timesteps_per_distribution",
             "timestep_remainder_per_distribution",
             "total_training_updates_per_stream",
             "total_training_optimizer_steps_per_stream",
+            "total_training_warmup_optimizer_steps_per_stream",
             "adaptation_probe_count",
             "updates_per_adaptation_probe",
             "optimizer_steps_per_adaptation_probe",
+            "warmup_optimizer_steps_per_adaptation_probe",
         }
     )
     _expect_keys(
@@ -709,6 +722,9 @@ def _validate_derived_expectations(
         "optimizer_steps_per_distribution": (
             derived.training_per_distribution.total_optimizer_steps
         ),
+        "warmup_optimizer_steps_per_distribution": (
+            derived.training_per_distribution.warmup_optimizer_steps
+        ),
         "consumed_timesteps_per_distribution": (
             derived.training_per_distribution.consumed_timesteps
         ),
@@ -719,10 +735,16 @@ def _validate_derived_expectations(
         "total_training_optimizer_steps_per_stream": (
             derived.total_training_optimizer_steps_per_stream
         ),
+        "total_training_warmup_optimizer_steps_per_stream": (
+            derived.total_training_warmup_optimizer_steps_per_stream
+        ),
         "adaptation_probe_count": derived.adaptation_probe_count,
         "updates_per_adaptation_probe": adaptation.num_updates if adaptation else 0,
         "optimizer_steps_per_adaptation_probe": (
             adaptation.total_optimizer_steps if adaptation else 0
+        ),
+        "warmup_optimizer_steps_per_adaptation_probe": (
+            adaptation.warmup_optimizer_steps if adaptation else 0
         ),
     }
     for key, actual_value in actual.items():

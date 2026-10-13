@@ -9,11 +9,12 @@ TREE_DEPTH: 6
 INCLUDE_RULES_IN_OBS: false
 
 architecture:
-  # PureJaxRL's recurrent PPO has one shared input FC and one FC in each head.
+  # Match the supplied authors' implementation: Dense(EMBED_DIM=512), a
+  # Dense(GRU_HIDDEN_DIM=256) projection, then two FC_DIM=1024 layers per head.
   # Output projections to logits/value are not counted as hidden FC layers.
-  shared_pre_gru_fc_layers: 1
-  actor_head_fc_layers: 1
-  critic_head_fc_layers: 1
+  shared_pre_gru_fc_layers: 2
+  actor_head_fc_layers: 2
+  critic_head_fc_layers: 2
 
 experiment:
   # The attached source names TwoAgentsGridWorld, but that name is retained
@@ -49,10 +50,13 @@ experiment:
 derived_expectations:
   updates_per_distribution: 381
   optimizer_steps_per_distribution: 3048
+  warmup_optimizer_steps_per_distribution: 152
   consumed_timesteps_per_distribution: 99876864
   timestep_remainder_per_distribution: 123136
   total_training_updates_per_stream: 2667
   total_training_optimizer_steps_per_stream: 21336
+  total_training_warmup_optimizer_steps_per_stream: 1064
   adaptation_probe_count: 7
   updates_per_adaptation_probe: 381
   optimizer_steps_per_adaptation_probe: 3048
+  warmup_optimizer_steps_per_adaptation_probe: 152

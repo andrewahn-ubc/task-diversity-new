@@ -54,6 +54,7 @@ def test_actor_critic_forward_shapes_include_all_cbp_activations() -> None:
     time, batch, obs_dim = 4, 2, 8
     model = ActorCriticRNN(
         action_dim=5,
+        embedding_dim=6,
         fc_dim=7,
         gru_hidden_dim=3,
         activation="relu",
@@ -62,18 +63,11 @@ def test_actor_critic_forward_shapes_include_all_cbp_activations() -> None:
     )
     hidden = initial_carry(batch, 3)
     obs = jax.random.normal(jax.random.key(1), (time, batch, obs_dim))
-    previous_actions = jax.nn.one_hot(
-        jnp.arange(time * batch).reshape(time, batch) % model.action_dim,
-        model.action_dim,
-        dtype=jnp.float32,
-    )
     resets = jnp.zeros((time, batch), dtype=jnp.bool_)
-    variables = model.init(
-        jax.random.key(2), hidden, obs, previous_actions, resets
-    )
+    variables = model.init(jax.random.key(2), hidden, obs, resets)
 
     final_hidden, logits, values, activations = model.apply(
-        variables, hidden, obs, previous_actions, resets
+        variables, hidden, obs, resets
     )
 
     assert final_hidden.shape == (batch, 3)
@@ -81,38 +75,52 @@ def test_actor_critic_forward_shapes_include_all_cbp_activations() -> None:
     assert values.shape == (time, batch)
     assert {name: value.shape for name, value in activations.items()} == {
         "rule_encoder": (time, batch, 4),
-        "obs_embed": (time, batch, 7),
+        "obs_embed": (time, batch, 6),
+        "rnn_input": (time, batch, 3),
         "gru": (time, batch, 3),
-        "actor_hidden": (time, batch, 7),
-        "critic_hidden": (time, batch, 7),
+        "actor_hidden_1": (time, batch, 7),
+        "actor_hidden_2": (time, batch, 7),
+        "critic_hidden_1": (time, batch, 7),
+        "critic_hidden_2": (time, batch, 7),
     }
-    assert variables["params"]["gru"]["x_r"].shape[0] == 7 + model.action_dim
+    params = variables["params"]
+    assert params["obs_embed"]["kernel"].shape == (
+        obs_dim - model.rule_obs_dim + model.ruleset_embed_dim,
+        6,
+    )
+    assert params["rnn_input"]["kernel"].shape == (6, 3)
+    assert params["gru"]["x_r"].shape == (3, 3)
+    assert params["actor_hidden_1"]["kernel"].shape == (3, 7)
+    assert params["actor_hidden_2"]["kernel"].shape == (7, 7)
+    assert params["critic_hidden_1"]["kernel"].shape == (3, 7)
+    assert params["critic_hidden_2"]["kernel"].shape == (7, 7)
 
 
-def test_previous_action_is_zeroed_at_episode_boundary() -> None:
+def test_author_output_initializers_use_scale_point_zero_one() -> None:
     model = ActorCriticRNN(
         action_dim=3,
+        embedding_dim=6,
         fc_dim=5,
         gru_hidden_dim=4,
         activation="relu",
     )
     hidden = initial_carry(2, 4)
     obs = jax.random.normal(jax.random.key(40), (1, 2, 6))
-    action_a = jax.nn.one_hot(jnp.asarray([[0, 1]]), 3, dtype=jnp.float32)
-    action_b = jax.nn.one_hot(jnp.asarray([[2, 2]]), 3, dtype=jnp.float32)
     reset = jnp.ones((1, 2), dtype=jnp.bool_)
-    variables = model.init(jax.random.key(41), hidden, obs, action_a, reset)
+    params = model.init(jax.random.key(41), hidden, obs, reset)["params"]
 
-    output_a = model.apply(variables, hidden, obs, action_a, reset)
-    output_b = model.apply(variables, hidden, obs, action_b, reset)
-
-    for left, right in zip(output_a[:3], output_b[:3]):
-        np.testing.assert_array_equal(left, right)
-
-    no_reset = jnp.zeros_like(reset)
-    active_a = model.apply(variables, hidden, obs, action_a, no_reset)
-    active_b = model.apply(variables, hidden, obs, action_b, no_reset)
-    assert np.max(np.abs(np.asarray(active_a[0] - active_b[0]))) > 1e-6
+    np.testing.assert_allclose(
+        np.linalg.norm(np.asarray(params["actor_out"]["kernel"]), axis=0),
+        np.full((3,), 0.01),
+        rtol=1e-5,
+        atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        np.linalg.norm(np.asarray(params["critic_out"]["kernel"]), axis=0),
+        np.asarray([0.01]),
+        rtol=1e-5,
+        atol=1e-6,
+    )
 
 
 def test_gru_reset_makes_suffix_independent_of_pre_reset_carry() -> None:

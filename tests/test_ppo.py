@@ -16,11 +16,37 @@ from td2.ppo import (
     adam_step,
     build_components,
     initialize_learner,
+    initialize_runner,
     make_update_fn,
+    scheduled_learning_rate,
 )
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_author_cosine_schedule_boundaries_and_constant_mode() -> None:
+    kwargs = {
+        "base_learning_rate": 1.0,
+        "total_optimizer_steps": 10,
+        "warmup_optimizer_steps": 2,
+        "anneal": True,
+    }
+    assert float(scheduled_learning_rate(jnp.asarray(0), **kwargs)) == 0.0
+    assert float(scheduled_learning_rate(jnp.asarray(1), **kwargs)) == 0.5
+    assert float(scheduled_learning_rate(jnp.asarray(2), **kwargs)) == 1.0
+    assert np.isclose(float(scheduled_learning_rate(jnp.asarray(6), **kwargs)), 0.5)
+    assert np.isclose(float(scheduled_learning_rate(jnp.asarray(10), **kwargs)), 0.0)
+
+    no_warmup = dict(kwargs, warmup_optimizer_steps=0)
+    assert float(scheduled_learning_rate(jnp.asarray(0), **no_warmup)) == 1.0
+    assert np.isclose(
+        float(scheduled_learning_rate(jnp.asarray(5), **no_warmup)), 0.5
+    )
+
+    constant = dict(kwargs, anneal=False)
+    assert float(scheduled_learning_rate(jnp.asarray(0), **constant)) == 1.0
+    assert float(scheduled_learning_rate(jnp.asarray(10), **constant)) == 1.0
 
 
 def test_adam_bias_correction_uses_elementwise_counters() -> None:
@@ -63,6 +89,13 @@ class _TinyEnv:
     action_dim = 2
     rule_obs_dim = 0
 
+    def reset(self, key):
+        del key
+        return (
+            jnp.zeros((self.num_envs, self.obs_dim), dtype=jnp.float32),
+            jnp.asarray(0, dtype=jnp.int32),
+        )
+
     def step(self, key, state, action):
         del key, action
         next_state = state + jnp.int32(1)
@@ -92,7 +125,12 @@ def test_cbp_replaced_gru_unit_is_masked_from_live_rollout_carry(monkeypatch) ->
             num_minibatches=1,
             update_epochs=1,
         ),
-        network=replace(config.network, fc_dim=4, recurrent_hidden_dim=3),
+        network=replace(
+            config.network,
+            embedding_dim=5,
+            fc_dim=4,
+            recurrent_hidden_dim=3,
+        ),
     )
     env = _TinyEnv()
     components = build_components(config, env, algorithm="ppo_cbp")
@@ -104,9 +142,6 @@ def test_cbp_replaced_gru_unit_is_masked_from_live_rollout_carry(monkeypatch) ->
         env_state=jnp.asarray(0, dtype=jnp.int32),
         obs=jnp.ones((env.num_envs, env.obs_dim), dtype=jnp.float32),
         last_done=jnp.zeros((env.num_envs,), dtype=jnp.bool_),
-        previous_action=jnp.zeros(
-            (env.num_envs, env.action_dim), dtype=jnp.float32
-        ),
         hidden=jnp.ones((env.num_envs, 3), dtype=jnp.float32),
         rng=jax.random.key(11),
         update_in_phase=jnp.asarray(0, dtype=jnp.int32),
@@ -131,8 +166,28 @@ def test_cbp_replaced_gru_unit_is_masked_from_live_rollout_carry(monkeypatch) ->
 
     np.testing.assert_array_equal(next_runner.hidden[:, 1], np.zeros((env.num_envs,)))
     assert np.any(np.abs(np.asarray(next_runner.hidden)[:, [0, 2]]) > 1e-7)
-    np.testing.assert_array_equal(
-        np.asarray(next_runner.previous_action).sum(axis=-1),
-        np.ones((env.num_envs,)),
-    )
     assert int(metrics["gru_units_replaced"]) == 1
+
+
+def test_reinitializing_environment_preserves_main_schedule_step() -> None:
+    config = load_config(ROOT / "configs" / "smoke.yaml")
+    config = replace(
+        config,
+        network=replace(
+            config.network,
+            embedding_dim=5,
+            fc_dim=4,
+            recurrent_hidden_dim=3,
+        ),
+    )
+    env = _TinyEnv()
+    components = build_components(config, env, algorithm="ppo")
+    learner = initialize_learner(
+        jax.random.key(20), config, components, obs_dim=env.obs_dim
+    ).replace(schedule_step=jnp.asarray(17, dtype=jnp.int32))
+
+    runner = initialize_runner(
+        jax.random.key(21), config, components, env, learner=learner
+    )
+
+    assert int(runner.learner.schedule_step) == 17

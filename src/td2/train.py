@@ -21,6 +21,7 @@ import numpy as np
 from td2.checkpoint import (
     CheckpointError,
     atomic_marker,
+    checkpoint_metadata,
     load_checkpoint_with_metadata,
     save_checkpoint,
 )
@@ -76,7 +77,7 @@ METRIC_FIELDS = (
 
 
 _STOP_REQUESTED = False
-PROTOCOL_VERSION = 4
+PROTOCOL_VERSION = 5
 
 
 def _request_stop(_signum, _frame) -> None:
@@ -448,6 +449,8 @@ def _checkpoint_meta(
         "source_distribution": source_distribution,
         "update_in_phase": _as_int(runner.update_in_phase),
         "global_update": _as_int(runner.global_update),
+        "optimizer_steps": _as_int(runner.learner.optimizer_steps),
+        "schedule_step": _as_int(runner.learner.schedule_step),
         "protocol_identity": dict(protocol_identity),
     }
 
@@ -503,6 +506,24 @@ def _validate_identity(
     }
     if mismatches:
         raise CheckpointError(f"checkpoint identity mismatch: {mismatches}")
+
+
+def _validate_checkpoint_counters(
+    metadata: Mapping[str, Any], runner: RunnerState
+) -> None:
+    expected = {
+        "update_in_phase": _as_int(runner.update_in_phase),
+        "global_update": _as_int(runner.global_update),
+        "optimizer_steps": _as_int(runner.learner.optimizer_steps),
+        "schedule_step": _as_int(runner.learner.schedule_step),
+    }
+    mismatches = {
+        key: (metadata.get(key), value)
+        for key, value in expected.items()
+        if metadata.get(key) != value
+    }
+    if mismatches:
+        raise CheckpointError(f"checkpoint counter mismatch: {mismatches}")
 
 
 def _tree_values_equal(left: Any, right: Any) -> bool:
@@ -571,6 +592,15 @@ def _run_main(args, config: TD2Config, diversity_n: int, stream_root: Path) -> b
     protocol_identity = _protocol_identity(config, args.data_root)
     resume_root = stream_root / "resume"
     if (resume_root / "latest.json").exists() or (resume_root / "previous.json").exists():
+        pointer_metadata = checkpoint_metadata(resume_root)
+        _validate_identity(
+            pointer_metadata,
+            mode="main",
+            algorithm=args.algorithm,
+            diversity_n=diversity_n,
+            seed=args.seed,
+            protocol_identity=protocol_identity,
+        )
         # Runner PyTree shapes are invariant across distributions because data
         # generation pads every ruleset round to one global width.  A stage-1
         # template therefore lets the checkpoint loader atomically choose the
@@ -592,6 +622,7 @@ def _run_main(args, config: TD2Config, diversity_n: int, stream_root: Path) -> b
             seed=args.seed,
             protocol_identity=protocol_identity,
         )
+        _validate_checkpoint_counters(metadata, runner)
         distribution = int(metadata["distribution"])
         env, pool = _environment(
             config,
@@ -620,8 +651,12 @@ def _run_main(args, config: TD2Config, diversity_n: int, stream_root: Path) -> b
         config,
         components,
         env,
-        total_optimizer_steps=schedule.total_optimizer_steps,
-        warmup_optimizer_steps=schedule.warmup_optimizer_steps,
+        total_optimizer_steps=(
+            config.derived.total_training_optimizer_steps_per_stream
+        ),
+        warmup_optimizer_steps=(
+            config.derived.total_training_warmup_optimizer_steps_per_stream
+        ),
     )
     evaluate = (
         None
@@ -707,15 +742,12 @@ def _run_main(args, config: TD2Config, diversity_n: int, stream_root: Path) -> b
             )
             components = build_components(config, env, algorithm=args.algorithm)
             key_next, key_keep = jax.random.split(runner.rng)
-            learner = runner.learner.replace(
-                schedule_step=jnp.asarray(0, dtype=jnp.int32)
-            )
             runner = initialize_runner(
                 key_next,
                 config,
                 components,
                 env,
-                learner=learner,
+                learner=runner.learner,
                 global_update=runner.global_update,
             ).replace(rng=jax.random.fold_in(key_keep, distribution))
             _save_resume(
@@ -732,8 +764,12 @@ def _run_main(args, config: TD2Config, diversity_n: int, stream_root: Path) -> b
                 config,
                 components,
                 env,
-                total_optimizer_steps=schedule.total_optimizer_steps,
-                warmup_optimizer_steps=schedule.warmup_optimizer_steps,
+                total_optimizer_steps=(
+                    config.derived.total_training_optimizer_steps_per_stream
+                ),
+                warmup_optimizer_steps=(
+                    config.derived.total_training_warmup_optimizer_steps_per_stream
+                ),
             )
             evaluate = (
                 None
@@ -873,9 +909,17 @@ def _load_parent_learner(
         distribution=stage,
         seed=args.seed,
     )
-    parent, metadata = load_checkpoint_with_metadata(
-        source_root / "checkpoint", template
+    checkpoint_root = source_root / "checkpoint"
+    pointer_metadata = checkpoint_metadata(checkpoint_root)
+    _validate_identity(
+        pointer_metadata,
+        mode="main-stage",
+        algorithm=args.algorithm,
+        diversity_n=diversity_n,
+        seed=args.seed,
+        protocol_identity=protocol_identity,
     )
+    parent, metadata = load_checkpoint_with_metadata(checkpoint_root, template)
     _validate_identity(
         metadata,
         mode="main-stage",
@@ -886,6 +930,7 @@ def _load_parent_learner(
     )
     if int(metadata.get("distribution", -1)) != stage:
         raise CheckpointError("parent checkpoint stage mismatch")
+    _validate_checkpoint_counters(metadata, parent)
     return parent.learner, parent.global_update
 
 
@@ -907,6 +952,12 @@ def _run_adapt(args, config: TD2Config, diversity_n: int, stream_root: Path) -> 
     parent_learner, parent_global = _load_parent_learner(
         args, config, diversity_n, args.stage, protocol_identity
     )
+    # Each heldout branch is a separate, fixed-budget adaptation run.  Give all
+    # stages the same authors-style 100M-step schedule while leaving the main
+    # continual trajectory's schedule uninterrupted across distributions.
+    parent_learner = parent_learner.replace(
+        schedule_step=jnp.asarray(0, dtype=jnp.int32)
+    )
     key = _stable_fold(
         jax.random.PRNGKey(args.seed),
         0x41444150,
@@ -923,6 +974,15 @@ def _run_adapt(args, config: TD2Config, diversity_n: int, stream_root: Path) -> 
     )
     resume_root = stream_root / "resume"
     if (resume_root / "latest.json").exists() or (resume_root / "previous.json").exists():
+        pointer_metadata = checkpoint_metadata(resume_root)
+        _validate_identity(
+            pointer_metadata,
+            mode="adapt",
+            algorithm=args.algorithm,
+            diversity_n=diversity_n,
+            seed=args.seed,
+            protocol_identity=protocol_identity,
+        )
         runner, metadata = load_checkpoint_with_metadata(resume_root, template)
         _validate_identity(
             metadata,
@@ -932,6 +992,7 @@ def _run_adapt(args, config: TD2Config, diversity_n: int, stream_root: Path) -> 
             seed=args.seed,
             protocol_identity=protocol_identity,
         )
+        _validate_checkpoint_counters(metadata, runner)
         if int(metadata.get("source_distribution", -1)) != args.stage:
             raise CheckpointError("adaptation source stage mismatch")
     else:

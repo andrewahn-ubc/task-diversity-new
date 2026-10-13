@@ -31,10 +31,13 @@ experiment:
 derived_expectations:
   updates_per_distribution: 8
   optimizer_steps_per_distribution: 16
+  warmup_optimizer_steps_per_distribution: 0
   consumed_timesteps_per_distribution: 256
   timestep_remainder_per_distribution: 0
   total_training_updates_per_stream: 16
   total_training_optimizer_steps_per_stream: 32
+  total_training_warmup_optimizer_steps_per_stream: 0
   adaptation_probe_count: 2
   updates_per_adaptation_probe: 4
   optimizer_steps_per_adaptation_probe: 8
+  warmup_optimizer_steps_per_adaptation_probe: 0

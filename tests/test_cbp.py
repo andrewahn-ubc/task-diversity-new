@@ -14,6 +14,7 @@ from td2.cbp import (
     _select_replacements,
     apply_continual_backprop,
     init_cbp_state,
+    outgoing_weight_magnitude,
 )
 
 
@@ -32,6 +33,10 @@ def _params():
                 "kernel": _values((3, 3), 1.0),
                 "bias": _values((3,), 0.1),
             },
+            "rnn_input": {
+                "kernel": _values((3, 3), 5.0),
+                "bias": _values((3,), 0.15),
+            },
             "gru": {
                 "x_r": _values((3, 3), 10.0),
                 "x_z": _values((3, 3), 20.0),
@@ -44,17 +49,25 @@ def _params():
                 "b_n": _values((3,), 0.4),
                 "b_hn": _values((3,), 0.45),
             },
-            "actor_hidden": {
+            "actor_hidden_1": {
                 "kernel": _values((3, 3), 70.0),
                 "bias": _values((3,), 0.5),
+            },
+            "actor_hidden_2": {
+                "kernel": _values((3, 3), 75.0),
+                "bias": _values((3,), 0.55),
             },
             "actor_out": {
                 "kernel": _values((3, 2), 80.0),
                 "bias": _values((2,), 0.6),
             },
-            "critic_hidden": {
+            "critic_hidden_1": {
                 "kernel": _values((3, 3), 90.0),
                 "bias": _values((3,), 0.7),
+            },
+            "critic_hidden_2": {
+                "kernel": _values((3, 3), 95.0),
+                "bias": _values((3,), 0.75),
             },
             "critic_out": {
                 "kernel": _values((3, 1), 100.0),
@@ -127,7 +140,46 @@ def test_no_replacements_or_mutations_before_maturity() -> None:
         assert all(not np.asarray(mask).any() for mask in unit_replacements.values())
         _assert_tree_equal(current_params, params)
         _assert_tree_equal(current_adam, adam)
-    assert all(np.all(np.asarray(layer.age) == 2) for layer in current_state.layers.values())
+    assert all(
+        np.all(np.asarray(layer.age) == 2)
+        for layer in current_state.layers.values()
+    )
+
+
+def test_expanded_cbp_state_and_outgoing_graph() -> None:
+    params = _params()
+    state = init_cbp_state(params)
+    assert set(state.layers) == {
+        "actor_hidden_1",
+        "actor_hidden_2",
+        "critic_hidden_1",
+        "critic_hidden_2",
+        "gru",
+        "obs_embed",
+        "rnn_input",
+    }
+    assert all(layer.utility.shape == (3,) for layer in state.layers.values())
+
+    p = unfreeze(params)
+    np.testing.assert_allclose(
+        outgoing_weight_magnitude(params, "obs_embed"),
+        np.mean(np.abs(p["rnn_input"]["kernel"]), axis=1),
+    )
+    np.testing.assert_allclose(
+        outgoing_weight_magnitude(params, "rnn_input"),
+        sum(
+            np.mean(np.abs(p["gru"][f"x_{gate}"]), axis=1)
+            for gate in ("r", "z", "n")
+        ),
+    )
+    np.testing.assert_allclose(
+        outgoing_weight_magnitude(params, "actor_hidden_1"),
+        np.mean(np.abs(p["actor_hidden_2"]["kernel"]), axis=1),
+    )
+    np.testing.assert_allclose(
+        outgoing_weight_magnitude(params, "actor_hidden_2"),
+        np.mean(np.abs(p["actor_out"]["kernel"]), axis=1),
+    )
 
 
 def test_fractional_budget_accumulates_and_selects_lowest_utility() -> None:
@@ -166,55 +218,58 @@ def test_dense_replacement_resets_exact_parameter_and_adam_slices() -> None:
     params = _params()
     old = unfreeze(params)
     adam = _adam(params)
-    state = _make_only_unit_one_mature(init_cbp_state(params), "actor_hidden")
+    state = _make_only_unit_one_mature(init_cbp_state(params), "actor_hidden_1")
     config = CBPConfig(utility_decay=0.0, maturity_steps=2, replacement_rate=1.0)
 
     new_params, new_adam, _, replacements, masks = apply_continual_backprop(
         params,
         adam,
         state,
-        _stats(state, target="actor_hidden", target_mean=2.0),
+        _stats(state, target="actor_hidden_1", target_mean=2.0),
         jax.random.key(20),
         config,
     )
     new = unfreeze(new_params)
 
     assert int(replacements) == 1
-    np.testing.assert_array_equal(masks["actor_hidden"], [False, True, False])
+    np.testing.assert_array_equal(masks["actor_hidden_1"], [False, True, False])
     np.testing.assert_array_equal(
-        np.asarray(new["actor_hidden"]["kernel"])[:, [0, 2]],
-        np.asarray(old["actor_hidden"]["kernel"])[:, [0, 2]],
+        np.asarray(new["actor_hidden_1"]["kernel"])[:, [0, 2]],
+        np.asarray(old["actor_hidden_1"]["kernel"])[:, [0, 2]],
     )
-    assert float(new["actor_hidden"]["bias"][1]) == 0.0
+    assert float(new["actor_hidden_1"]["bias"][1]) == 0.0
     np.testing.assert_array_equal(
-        np.asarray(new["actor_hidden"]["bias"])[[0, 2]],
-        np.asarray(old["actor_hidden"]["bias"])[[0, 2]],
+        np.asarray(new["actor_hidden_1"]["bias"])[[0, 2]],
+        np.asarray(old["actor_hidden_1"]["bias"])[[0, 2]],
     )
-    np.testing.assert_array_equal(new["actor_out"]["kernel"][1], np.zeros((2,)))
     np.testing.assert_array_equal(
-        np.asarray(new["actor_out"]["kernel"])[[0, 2]],
-        np.asarray(old["actor_out"]["kernel"])[[0, 2]],
+        new["actor_hidden_2"]["kernel"][1], np.zeros((3,))
+    )
+    np.testing.assert_array_equal(
+        np.asarray(new["actor_hidden_2"]["kernel"])[[0, 2]],
+        np.asarray(old["actor_hidden_2"]["kernel"])[[0, 2]],
     )
     np.testing.assert_allclose(
-        new["actor_out"]["bias"],
-        old["actor_out"]["bias"] + 2.0 * old["actor_out"]["kernel"][1],
+        new["actor_hidden_2"]["bias"],
+        old["actor_hidden_2"]["bias"]
+        + 2.0 * old["actor_hidden_2"]["kernel"][1],
     )
 
     for field, untouched in (("count", 7), ("mu", 2.0), ("nu", 3.0)):
         tree = unfreeze(getattr(new_adam, field))
-        np.testing.assert_array_equal(tree["actor_hidden"]["kernel"][:, 1], 0)
+        np.testing.assert_array_equal(tree["actor_hidden_1"]["kernel"][:, 1], 0)
         np.testing.assert_array_equal(
-            np.asarray(tree["actor_hidden"]["kernel"])[:, [0, 2]], untouched
+            np.asarray(tree["actor_hidden_1"]["kernel"])[:, [0, 2]], untouched
         )
-        assert float(tree["actor_hidden"]["bias"][1]) == 0.0
+        assert float(tree["actor_hidden_1"]["bias"][1]) == 0.0
         np.testing.assert_array_equal(
-            np.asarray(tree["actor_hidden"]["bias"])[[0, 2]], untouched
+            np.asarray(tree["actor_hidden_1"]["bias"])[[0, 2]], untouched
         )
-        np.testing.assert_array_equal(tree["actor_out"]["kernel"][1], 0)
+        np.testing.assert_array_equal(tree["actor_hidden_2"]["kernel"][1], 0)
         np.testing.assert_array_equal(
-            np.asarray(tree["actor_out"]["kernel"])[[0, 2]], untouched
+            np.asarray(tree["actor_hidden_2"]["kernel"])[[0, 2]], untouched
         )
-        np.testing.assert_array_equal(tree["actor_out"]["bias"], 0)
+        np.testing.assert_array_equal(tree["actor_hidden_2"]["bias"], 0)
 
 
 def test_gru_replacement_resets_incoming_columns_and_all_outgoing_rows() -> None:
@@ -265,7 +320,7 @@ def test_gru_replacement_resets_incoming_columns_and_all_outgoing_rows() -> None
             expected_input_bias[1] = 0.0
             np.testing.assert_allclose(new["gru"][input_bias], expected_input_bias)
 
-    for destination in ("actor_hidden", "critic_hidden"):
+    for destination in ("actor_hidden_1", "critic_hidden_1"):
         np.testing.assert_array_equal(new[destination]["kernel"][1], np.zeros((3,)))
         np.testing.assert_array_equal(
             np.asarray(new[destination]["kernel"])[[0, 2]],
@@ -295,7 +350,7 @@ def test_gru_replacement_resets_incoming_columns_and_all_outgoing_rows() -> None
         np.testing.assert_array_equal(
             np.asarray(tree["gru"]["b_n"])[[0, 2]], untouched
         )
-        for destination in ("actor_hidden", "critic_hidden"):
+        for destination in ("actor_hidden_1", "critic_hidden_1"):
             np.testing.assert_array_equal(tree[destination]["kernel"][1], 0)
             np.testing.assert_array_equal(
                 np.asarray(tree[destination]["kernel"])[[0, 2]], untouched
@@ -323,48 +378,72 @@ def test_simultaneous_replacements_keep_every_new_unit_disconnected() -> None:
         config,
     )
     new = unfreeze(new_params)
-    assert int(replacements) == 12
+    assert int(replacements) == 21
     for replace in masks.values():
         np.testing.assert_array_equal(replace, np.ones((3,), dtype=np.bool_))
     for gate in ("r", "z", "n"):
         np.testing.assert_array_equal(new["gru"][f"x_{gate}"], 0)
         np.testing.assert_array_equal(new["gru"][f"h_{gate}"], 0)
-    np.testing.assert_array_equal(new["actor_hidden"]["kernel"], 0)
-    np.testing.assert_array_equal(new["critic_hidden"]["kernel"], 0)
+    np.testing.assert_array_equal(new["rnn_input"]["kernel"], 0)
+    np.testing.assert_array_equal(new["actor_hidden_1"]["kernel"], 0)
+    np.testing.assert_array_equal(new["actor_hidden_2"]["kernel"], 0)
+    np.testing.assert_array_equal(new["critic_hidden_1"]["kernel"], 0)
+    np.testing.assert_array_equal(new["critic_hidden_2"]["kernel"], 0)
     np.testing.assert_array_equal(new["actor_out"]["kernel"], 0)
     np.testing.assert_array_equal(new["critic_out"]["kernel"], 0)
     np.testing.assert_array_equal(new["obs_embed"]["bias"], 0)
     for bias in ("b_r", "b_z", "b_n", "b_hn"):
         np.testing.assert_array_equal(new["gru"][bias], 0)
-    np.testing.assert_array_equal(new["actor_hidden"]["bias"], 0)
-    np.testing.assert_array_equal(new["critic_hidden"]["bias"], 0)
+    np.testing.assert_array_equal(new["rnn_input"]["bias"], 0)
+    np.testing.assert_array_equal(new["actor_hidden_1"]["bias"], 0)
+    np.testing.assert_array_equal(new["actor_hidden_2"]["bias"], 0)
+    np.testing.assert_array_equal(new["critic_hidden_1"]["bias"], 0)
+    np.testing.assert_array_equal(new["critic_hidden_2"]["bias"], 0)
 
 
-def test_obs_replacement_does_not_zero_previous_action_rows() -> None:
-    mutable = unfreeze(_params())
-    original_action_rows = {}
-    for gate, offset in (("r", 1.0), ("z", 2.0), ("n", 3.0)):
-        name = f"x_{gate}"
-        action_rows = _values((2, 3), 200.0 + offset)
-        mutable["gru"][name] = jnp.concatenate(
-            (mutable["gru"][name], action_rows), axis=0
-        )
-        original_action_rows[name] = np.asarray(action_rows)
-    params = freeze(mutable)
+def test_rnn_input_replacement_resets_all_gru_input_edges() -> None:
+    params = _params()
+    old = unfreeze(params)
     adam = _adam(params)
-    state = _make_only_unit_one_mature(init_cbp_state(params), "obs_embed")
+    state = _make_only_unit_one_mature(init_cbp_state(params), "rnn_input")
     config = CBPConfig(utility_decay=0.0, maturity_steps=2, replacement_rate=1.0)
 
-    new_params, _, _, replacements, _ = apply_continual_backprop(
+    new_params, new_adam, _, replacements, masks = apply_continual_backprop(
         params,
         adam,
         state,
-        _stats(state, target="obs_embed", target_mean=2.0),
+        _stats(state, target="rnn_input", target_mean=2.0),
         jax.random.key(23),
         config,
     )
     new = unfreeze(new_params)
 
     assert int(replacements) == 1
-    for name, expected in original_action_rows.items():
-        np.testing.assert_array_equal(np.asarray(new["gru"][name])[-2:, :], expected)
+    np.testing.assert_array_equal(masks["rnn_input"], [False, True, False])
+    assert float(new["rnn_input"]["bias"][1]) == 0.0
+    np.testing.assert_array_equal(
+        np.asarray(new["rnn_input"]["kernel"])[:, [0, 2]],
+        np.asarray(old["rnn_input"]["kernel"])[:, [0, 2]],
+    )
+    for gate in ("r", "z", "n"):
+        name = f"x_{gate}"
+        np.testing.assert_array_equal(new["gru"][name][1], np.zeros((3,)))
+        np.testing.assert_array_equal(
+            np.asarray(new["gru"][name])[[0, 2]],
+            np.asarray(old["gru"][name])[[0, 2]],
+        )
+        np.testing.assert_allclose(
+            new["gru"][f"b_{gate}"],
+            old["gru"][f"b_{gate}"] + 2.0 * old["gru"][name][1],
+        )
+
+    for field, untouched in (("count", 7), ("mu", 2.0), ("nu", 3.0)):
+        tree = unfreeze(getattr(new_adam, field))
+        np.testing.assert_array_equal(tree["rnn_input"]["kernel"][:, 1], 0)
+        np.testing.assert_array_equal(
+            np.asarray(tree["rnn_input"]["kernel"])[:, [0, 2]], untouched
+        )
+        assert float(tree["rnn_input"]["bias"][1]) == 0.0
+        for gate in ("r", "z", "n"):
+            np.testing.assert_array_equal(tree["gru"][f"x_{gate}"][1], 0)
+            np.testing.assert_array_equal(tree["gru"][f"b_{gate}"], 0)

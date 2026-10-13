@@ -40,11 +40,13 @@ def test_default_experiment_contract_and_derived_schedule() -> None:
     assert "reference to 10" in config.experiment.ambiguity_resolution
     assert config.runtime.seeds == (0, 1, 2, 3, 4)
 
-    assert config.architecture.shared_pre_gru_fc_layers == 1
-    assert config.architecture.actor_head_fc_layers == 1
-    assert config.architecture.critic_head_fc_layers == 1
+    assert config.architecture.shared_pre_gru_fc_layers == 2
+    assert config.architecture.actor_head_fc_layers == 2
+    assert config.architecture.critic_head_fc_layers == 2
+    assert config.network.embedding_dim == 512
 
     schedule = config.derived.training_per_distribution
+    adaptation = config.derived.adaptation_per_probe
     assert schedule.num_actors == 2048
     assert schedule.environment_steps_per_update == 262_144
     assert schedule.num_updates == 381
@@ -54,10 +56,16 @@ def test_default_experiment_contract_and_derived_schedule() -> None:
     assert schedule.actor_transitions_per_minibatch == 65_536
     assert schedule.optimizer_steps_per_update == 8
     assert schedule.total_optimizer_steps == 3048
-    assert schedule.warmup_optimizer_steps == 153
+    assert schedule.warmup_optimizer_steps == 152
     assert config.derived.total_training_updates_per_stream == 2667
     assert config.derived.total_training_optimizer_steps_per_stream == 21_336
+    assert (
+        config.derived.total_training_warmup_optimizer_steps_per_stream == 1_064
+    )
     assert config.derived.adaptation_probe_count == 7
+    assert adaptation is not None
+    assert adaptation.total_optimizer_steps == 3_048
+    assert adaptation.warmup_optimizer_steps == 152
 
 
 def test_config_and_nested_values_are_immutable() -> None:
@@ -75,6 +83,7 @@ def test_smoke_config_inherits_and_recomputes_schedule() -> None:
     assert config.ppo.num_envs == 4
     assert config.ppo.num_steps == 8
     assert config.network.fc_dim == 32
+    assert config.network.embedding_dim == 16
     assert config.experiment.num_distributions == 2
     assert config.experiment.adaptation.after_distributions == (1, 2)
     assert config.runtime.num_seeds == 1
@@ -88,9 +97,12 @@ def test_smoke_config_inherits_and_recomputes_schedule() -> None:
     assert training.total_optimizer_steps == 16
     assert config.derived.total_training_updates_per_stream == 16
     assert config.derived.total_training_optimizer_steps_per_stream == 32
+    assert config.derived.total_training_warmup_optimizer_steps_per_stream == 0
+    assert training.warmup_optimizer_steps == 0
     assert adaptation is not None
     assert adaptation.num_updates == 4
     assert adaptation.total_optimizer_steps == 8
+    assert adaptation.warmup_optimizer_steps == 0
 
 
 def test_nonintegral_step_count_is_rejected(tmp_path: Path) -> None:

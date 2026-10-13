@@ -59,7 +59,6 @@ class RunnerState:
     env_state: Any
     obs: Array
     last_done: Array
-    previous_action: Array
     hidden: Array
     rng: Array
     update_in_phase: Array
@@ -75,7 +74,6 @@ class Transition:
     next_done: Array
     log_prob: Array
     obs: Array
-    previous_action: Array
     episode_complete: Array
     episode_return: Array
     success: Array
@@ -104,6 +102,7 @@ def build_components(
         raise ValueError("The pinned PureJaxRL recurrent implementation requires GRU")
     model = ActorCriticRNN(
         action_dim=env.action_dim,
+        embedding_dim=config.network.embedding_dim,
         fc_dim=config.network.fc_dim,
         gru_hidden_dim=config.network.recurrent_hidden_dim,
         activation=config.network.activation,
@@ -181,7 +180,7 @@ def adam_step(
     return new_params, ElementwiseAdamState(count=count, mu=mu, nu=nu), grad_norm
 
 
-def phase_learning_rate(
+def scheduled_learning_rate(
     schedule_step: Array,
     *,
     base_learning_rate: float,
@@ -189,20 +188,24 @@ def phase_learning_rate(
     warmup_optimizer_steps: int,
     anneal: bool,
 ) -> Array:
-    """Warm up then linearly anneal within one distribution/adaptation phase."""
+    """Match the authors' zero-start warmup followed by cosine decay."""
 
     step = schedule_step.astype(jnp.float32)
     base = jnp.asarray(base_learning_rate, jnp.float32)
-    warmup = max(1, int(warmup_optimizer_steps))
-    warm = base * jnp.minimum((step + 1.0) / float(warmup), 1.0)
     if not anneal:
-        return jnp.where(step < warmup, warm, base)
-    decay_denominator = max(1, int(total_optimizer_steps) - warmup)
-    decay = base * jnp.maximum(
-        0.0,
-        (float(total_optimizer_steps) - step) / float(decay_denominator),
+        return base
+
+    warmup = int(warmup_optimizer_steps)
+    if warmup:
+        warm = base * jnp.clip(step / float(warmup), 0.0, 1.0)
+    else:
+        warm = base
+    decay_steps = max(1, int(total_optimizer_steps) - warmup)
+    decay_step = jnp.clip(step - float(warmup), 0.0, float(decay_steps))
+    cosine = base * 0.5 * (
+        1.0 + jnp.cos(jnp.pi * decay_step / float(decay_steps))
     )
-    return jnp.where(step < warmup, warm, decay)
+    return jnp.where(step < warmup, warm, cosine)
 
 
 def initialize_learner(
@@ -213,13 +216,10 @@ def initialize_learner(
     obs_dim: int,
 ) -> LearnerState:
     dummy_obs = jnp.zeros((1, 1, obs_dim), dtype=jnp.float32)
-    dummy_previous_action = jnp.zeros(
-        (1, 1, components.model.action_dim), dtype=jnp.float32
-    )
     dummy_reset = jnp.zeros((1, 1), dtype=jnp.bool_)
     dummy_hidden = initial_carry(1, config.network.recurrent_hidden_dim)
     variables = components.model.init(
-        key, dummy_hidden, dummy_obs, dummy_previous_action, dummy_reset
+        key, dummy_hidden, dummy_obs, dummy_reset
     )
     # Flax 0.12 returns a mutable dict here, while older releases returned a
     # FrozenDict.  Canonicalize it so JAX scan carries and CBP masks have one
@@ -251,17 +251,12 @@ def initialize_runner(
             components,
             obs_dim=env.obs_dim,
         )
-    else:
-        learner = learner.replace(schedule_step=jnp.asarray(0, dtype=jnp.int32))
     obs, env_state = env.reset(key_env)
     return RunnerState(
         learner=learner,
         env_state=env_state,
         obs=obs,
         last_done=jnp.zeros((env.num_envs,), dtype=jnp.bool_),
-        previous_action=jnp.zeros(
-            (env.num_envs, env.action_dim), dtype=jnp.float32
-        ),
         hidden=initial_carry(env.num_envs, config.network.recurrent_hidden_dim),
         rng=key_run,
         update_in_phase=jnp.asarray(0, dtype=jnp.int32),
@@ -275,7 +270,6 @@ def _loss_and_activations(
     model: ActorCriticRNN,
     hidden: Array,
     obs: Array,
-    previous_actions: Array,
     resets: Array,
     actions: Array,
     old_log_probs: Array,
@@ -288,7 +282,7 @@ def _loss_and_activations(
     entropy_coefficient: float,
 ):
     _, logits, values, activations = model.apply(
-        {"params": params}, hidden, obs, previous_actions, resets
+        {"params": params}, hidden, obs, resets
     )
     new_log_probs = categorical_log_prob(logits, actions)
     normalized_advantages = (
@@ -374,13 +368,12 @@ def make_update_fn(
         rollout_initial_hidden = runner.hidden
 
         def collect_step(carry, _):
-            obs, env_state, last_done, previous_action, hidden, rng = carry
+            obs, env_state, last_done, hidden, rng = carry
             rng, key_action, key_env = jax.random.split(rng, 3)
             next_hidden, logits, value, _ = model.apply(
                 {"params": runner.learner.params},
                 hidden,
                 obs[None, ...],
-                previous_action[None, ...],
                 last_done[None, ...],
             )
             next_hidden = next_hidden
@@ -391,14 +384,6 @@ def make_update_fn(
             next_obs, next_env_state, reward, next_done, info = env.step(
                 key_env, env_state, action
             )
-            next_previous_action = jax.nn.one_hot(
-                action, model.action_dim, dtype=jnp.float32
-            )
-            next_previous_action = jnp.where(
-                next_done[:, None],
-                jnp.zeros_like(next_previous_action),
-                next_previous_action,
-            )
             transition = Transition(
                 reset=last_done,
                 action=action,
@@ -407,7 +392,6 @@ def make_update_fn(
                 next_done=next_done,
                 log_prob=log_prob,
                 obs=obs,
-                previous_action=previous_action,
                 episode_complete=info["episode_complete"],
                 episode_return=info["episode_return"],
                 success=info["goal_achieved"],
@@ -417,7 +401,6 @@ def make_update_fn(
                 next_obs,
                 next_env_state,
                 next_done,
-                next_previous_action,
                 next_hidden,
                 rng,
             ), transition
@@ -426,7 +409,6 @@ def make_update_fn(
             runner.obs,
             runner.env_state,
             runner.last_done,
-            runner.previous_action,
             runner.hidden,
             runner.rng,
         )
@@ -434,7 +416,6 @@ def make_update_fn(
             next_obs,
             next_env_state,
             next_done,
-            next_previous_action,
             rollout_hidden,
             rng,
         ), transitions = jax.lax.scan(
@@ -444,7 +425,6 @@ def make_update_fn(
             {"params": runner.learner.params},
             rollout_hidden,
             next_obs[None, ...],
-            next_previous_action[None, ...],
             next_done[None, ...],
         )
         advantages, targets = _compute_gae(
@@ -473,7 +453,6 @@ def make_update_fn(
                     model=model,
                     hidden=hidden,
                     obs=select(transitions.obs),
-                    previous_actions=select(transitions.previous_action),
                     resets=select(transitions.reset),
                     actions=select(transitions.action),
                     old_log_probs=select(transitions.log_prob),
@@ -488,7 +467,7 @@ def make_update_fn(
                 (_, (loss_metrics, activation_stats)), grads = jax.value_and_grad(
                     loss_fn, has_aux=True
                 )(learner.params)
-                learning_rate = phase_learning_rate(
+                learning_rate = scheduled_learning_rate(
                     learner.schedule_step,
                     base_learning_rate=ppo.learning_rate,
                     total_optimizer_steps=total_optimizer_steps,
@@ -626,7 +605,6 @@ def make_update_fn(
             env_state=next_env_state,
             obs=next_obs,
             last_done=next_done,
-            previous_action=next_previous_action,
             hidden=rollout_hidden,
             rng=rng,
             update_in_phase=runner.update_in_phase + jnp.int32(1),
@@ -684,9 +662,6 @@ def make_evaluation_fn(
         )
         hidden = initial_carry(env.num_envs, config.network.recurrent_hidden_dim)
         last_done = jnp.zeros((env.num_envs,), dtype=jnp.bool_)
-        previous_action = jnp.zeros(
-            (env.num_envs, env.action_dim), dtype=jnp.float32
-        )
         active = jnp.ones((env.num_envs,), dtype=jnp.bool_)
         success = jnp.zeros((env.num_envs,), dtype=jnp.float32)
         episode_return = jnp.zeros((env.num_envs,), dtype=jnp.float32)
@@ -698,7 +673,6 @@ def make_evaluation_fn(
                 env_state,
                 hidden,
                 last_done,
-                previous_action,
                 active,
                 success,
                 returns,
@@ -707,7 +681,6 @@ def make_evaluation_fn(
                 {"params": params},
                 hidden,
                 obs[None, ...],
-                previous_action[None, ...],
                 last_done[None, ...],
             )
             action = categorical_mode(logits[0])
@@ -715,12 +688,6 @@ def make_evaluation_fn(
                 key_step, env_state, action
             )
             first_terminal = active & done
-            previous_action = jax.nn.one_hot(
-                action, model.action_dim, dtype=jnp.float32
-            )
-            previous_action = jnp.where(
-                done[:, None], jnp.zeros_like(previous_action), previous_action
-            )
             success = jnp.where(
                 first_terminal, info["goal_achieved"], success
             )
@@ -733,7 +700,6 @@ def make_evaluation_fn(
                 env_state,
                 hidden,
                 done,
-                previous_action,
                 active,
                 success,
                 returns,
@@ -744,13 +710,12 @@ def make_evaluation_fn(
             env_state,
             hidden,
             last_done,
-            previous_action,
             active,
             success,
             episode_return,
         )
         final, _ = jax.lax.scan(step, initial, step_keys)
-        active, success, episode_return = final[5], final[6], final[7]
+        active, success, episode_return = final[4], final[5], final[6]
         depth_oh = jax.nn.one_hot(jnp.clip(depths - 1, 0, 5), 6)
         depth_count = jnp.sum(depth_oh, axis=0)
         depth_success = jnp.sum(depth_oh * success[:, None], axis=0)

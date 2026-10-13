@@ -73,7 +73,7 @@ in favor of seven and creates a branch after each of stages 1 through 7.
 
 Each adaptation branch loads the complete immutable parent learner state:
 parameters, Adam moments and per-parameter counters, and—under CBP—unit ages
-and utility estimates. It resets the environment, GRU carry, and per-phase
+and utility estimates. It resets the environment, GRU carry, and a branch-local
 learning-rate schedule, trains only on the fixed held-out set, and writes to a
 separate directory. No branch can alter the original continual trajectory.
 
@@ -86,28 +86,25 @@ state behavior from PureJaxRL's `ppo_rnn.py` at commit
 repository rather than an importable library, so the audited algorithm is
 ported into this environment adapter instead of imported at runtime.
 
-The missing hidden-layer count is resolved with the closest PureJaxRL-style
-recurrent topology:
+The supplied authors' implementation resolves the previously missing
+hidden-layer count and recurrent topology:
 
 ```text
-flat observation -> Dense(1024, ReLU) --+
-previous-action one-hot ----------------+-> GRU(256)
-                                      -> Dense(1024, ReLU) -> policy logits
-                                      -> Dense(1024, ReLU) -> scalar value
+flat observation -> Dense(512, ReLU) -> Dense(256) -> GRU(256)
+                                                       |-> Dense(1024, ReLU)
+                                                       |   -> Dense(1024, ReLU)
+                                                       |   -> policy logits
+                                                       `-> Dense(1024, ReLU)
+                                                           -> Dense(1024, ReLU)
+                                                           -> scalar value
 ```
 
-That is one shared fully connected layer before the GRU and one hidden fully
-connected layer in each head; output projections are not counted as hidden
-layers.
+The GRU consumes only the projected current observation and the episode-reset
+mask, exactly as in that code; no previous-action one-hot is concatenated.
+Output projections are not counted as hidden layers.
 
-The paper states that the recurrent state uses the current observation and
-previous action but does not specify the PPO concatenation point. We use the
-minimal convention consistent with its PQN description: concatenate the
-previous-action one-hot after the observation embedding and before the GRU.
-It is the all-zero vector at initialization and after every episode boundary.
-
-CBP is applied after every optimizer step to the observation embedding, GRU,
-actor hidden layer, and critic hidden layer. It uses the paper's CBP-specific
+CBP is applied after every optimizer step to both pre-GRU layers, the GRU, and
+both hidden layers in each actor/critic head. It uses the paper's CBP-specific
 values: utility decay `0.986`, maturity `5000` gradient steps, and replacement
 rate `5e-5` with fractional accumulation. The generate-and-test mechanics are
 adapted from `loss-of-plasticity` commit
@@ -138,12 +135,13 @@ Banyan environment:
   two-agent environment.
 
 All applicable PPO values remain from the YAML: learning rate `3e-4`, 5%
-warmup and linear annealing, 2048 environments, 128 rollout steps, two epochs,
+warmup and cosine annealing, 2048 environments, 128 rollout steps, two epochs,
 four trajectory minibatches, horizon 256, actor clip `0.2`, value clip `10`,
 entropy coefficient `0.05`, `gamma=0.99`, `lambda=0.8`, value coefficient
-`0.8`, gradient norm `0.5`, FC width 1024, and GRU width 256. Adam state is
-continued across task distributions; only the requested warmup/annealing
-schedule restarts at a distribution boundary.
+`0.8`, gradient norm `0.5`, embedding width 512, FC width 1024, and GRU width
+256. Adam state and one continuous 700M-step learning-rate schedule are carried
+across task distributions. A fresh 100M-step schedule is used only inside each
+independent held-out adaptation branch.
 
 Environment-only values from the private YAML are used where Banyan has the
 same meaning, including the `-0.1` distractor penalty and 0.5 distractor-pair
@@ -152,10 +150,8 @@ paper's fixed first-pickup shaping reward and does not expose the private
 environment's shaping schedule. W&B is disabled in jobs; CSV logs are the
 authoritative record.
 
-The source `EMBEDDING: float` and `EMBED_DIM: 512` settings are retained as
-provenance but do not add another learned encoder: released Banyan already
-returns one fixed flat float observation, which the selected PureJaxRL-style
-`Dense(1024)` observation embedding consumes directly. `RULESET_EMBED_DIM` is
+The source `EMBEDDING: float` and `EMBED_DIM: 512` settings now directly define
+the authors' learned float-observation embedding. `RULESET_EMBED_DIM` remains
 inactive because task rules are deliberately hidden from the observation.
 
 Task generation uses the released Banyan depth-six, cross-round-disjoint
@@ -263,18 +259,19 @@ method/diversity/seed/stage trajectory is absent.
 
 ## Validation performed
 
-All 36 local tests pass. They cover configuration derivation, PPO/GAE and
+All 52 local tests pass. They cover configuration derivation, PPO/GAE and
 learning-rate semantics, recurrent reset/carry behavior, CBP replacement and
 optimizer-state resets, atomic checkpoint fallback, deterministic task/layout
 generation, completeness checks, and plot aggregation. An end-to-end
 production-sized data build completed all seven training rounds plus the
 logical-20 held-out round in 7m41s, validated 1,812 unique layouts and all
 cross-round exclusions, and published 25 hashed payloads; an immediate rerun
-verified the bundle in under one second. Fresh CPU smoke runs covered PPO and
-PPO+CBP main training, held-out adaptation, and checkpoint reload. A forced
-mid-stage stop followed by resume produced exactly the same decoded learner
-state and all 16 metric rows as an uninterrupted run. A complete synthetic
-result matrix exercised every plotting output.
+verified the bundle in under one second. Fresh CPU smoke runs with the expanded
+authors-style network covered PPO and PPO+CBP main training, a PPO+CBP held-out
+adaptation branch, and checkpoint reload. The two-distribution smoke checkpoint
+verified that the main schedule continued from optimizer step 16 to 32, while
+the branch used its own 0-to-8 schedule. A complete synthetic result matrix
+exercised every plotting output.
 
 The cluster smoke gate additionally checks pinned PEP 440 public package
 versions (while accepting Alliance's `+computecanada` local wheel label),
