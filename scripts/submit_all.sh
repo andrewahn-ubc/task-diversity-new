@@ -8,7 +8,7 @@ source "$SCRIPT_DIR/lib/common.sh"
 REPO_ROOT=$(td2_repo_root)
 
 CLUSTER=narval
-ACCOUNT=rrg-mijungp
+ACCOUNT=def-mijungp
 OUTPUT_ROOT=/scratch/taegyoem/td2-results-10dist-9div-cbp
 DATA_ROOT=''
 MAX_CONCURRENT=100
@@ -25,7 +25,7 @@ Run it on the login node of the cluster named by --cluster.
 
 Options:
   --cluster NAME       Slurm cluster (default: narval)
-  --account ACCOUNT    Allocation account (default: rrg-mijungp)
+  --account ACCOUNT    Allocation account (default: def-mijungp)
   --output-root PATH   Experiment output
                        (default: /scratch/taegyoem/td2-results-10dist-9div-cbp)
   --data-root PATH     Prepared data (default: value saved by setup)
