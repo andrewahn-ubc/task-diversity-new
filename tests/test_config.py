@@ -34,10 +34,21 @@ def test_scientific_notation_strings_are_normalized_to_integers() -> None:
 def test_default_experiment_contract_and_derived_schedule() -> None:
     config = load_config(EXPERIMENT_CONFIG)
 
-    assert config.experiment.num_distributions == 7
-    assert config.experiment.diversity_levels == (1, 16, 256, 4096, 65_536)
-    assert config.experiment.adaptation.after_distributions == tuple(range(1, 8))
-    assert "reference to 10" in config.experiment.ambiguity_resolution
+    assert config.experiment.num_distributions == 10
+    assert config.experiment.diversity_levels == (
+        1,
+        4,
+        16,
+        64,
+        256,
+        1_024,
+        4_096,
+        16_384,
+        65_536,
+    )
+    assert config.experiment.methods == ("ppo_cbp",)
+    assert config.experiment.adaptation.after_distributions == tuple(range(1, 11))
+    assert "full ten-distribution sequence" in config.experiment.ambiguity_resolution
     assert config.runtime.seeds == (0, 1, 2, 3, 4)
 
     assert config.architecture.shared_pre_gru_fc_layers == 2
@@ -57,12 +68,12 @@ def test_default_experiment_contract_and_derived_schedule() -> None:
     assert schedule.optimizer_steps_per_update == 8
     assert schedule.total_optimizer_steps == 3048
     assert schedule.warmup_optimizer_steps == 152
-    assert config.derived.total_training_updates_per_stream == 2667
-    assert config.derived.total_training_optimizer_steps_per_stream == 21_336
+    assert config.derived.total_training_updates_per_stream == 3810
+    assert config.derived.total_training_optimizer_steps_per_stream == 30_480
     assert (
-        config.derived.total_training_warmup_optimizer_steps_per_stream == 1_064
+        config.derived.total_training_warmup_optimizer_steps_per_stream == 1_520
     )
-    assert config.derived.adaptation_probe_count == 7
+    assert config.derived.adaptation_probe_count == 10
     assert adaptation is not None
     assert adaptation.total_optimizer_steps == 3_048
     assert adaptation.warmup_optimizer_steps == 152
@@ -74,7 +85,7 @@ def test_config_and_nested_values_are_immutable() -> None:
     with pytest.raises(FrozenInstanceError):
         config.ppo.total_timesteps = 1  # type: ignore[misc]
     with pytest.raises(FrozenInstanceError):
-        config.experiment.num_distributions = 10  # type: ignore[misc]
+        config.experiment.num_distributions = 11  # type: ignore[misc]
 
 
 def test_smoke_config_inherits_and_recomputes_schedule() -> None:

@@ -21,22 +21,19 @@ experiment:
   # only as provenance. The runnable protocol uses the released single-agent
   # Banyan environment, so each vectorized environment contributes one actor.
   num_agents: 1
-  num_distributions: 7
-  diversity_levels: [1, 16, 256, 4096, 65536] # {1^2, 4^2, 16^2, 64^2, 256^2}
-  methods: [ppo, ppo_cbp]
+  num_distributions: 10
+  # All nine Figure 6 levels: n in {1,2,4,8,16,32,64,128,256}.
+  diversity_levels: [1, 4, 16, 64, 256, 1024, 4096, 16384, 65536]
+  methods: [ppo_cbp]
 
-  # The request first changes Figure 6 from 10 to 7 training distributions,
-  # but later asks for probes after each of the 10 distributions. We resolve
-  # that conflict in favor of the explicit modification: probe after each of
-  # all seven distributions.
   ambiguity_resolution: >-
-    Use seven training distributions and branch an adaptation probe after
-    each of distributions 1 through 7; the later reference to 10 is treated
-    as inherited wording from the original experiment.
+    Use the paper's full ten-distribution sequence and all nine Figure 6
+    diversity levels, with PPO plus Continual Backpropagation as the sole
+    production method.
 
   adaptation:
     enabled: true
-    after_distributions: [1, 2, 3, 4, 5, 6, 7]
+    after_distributions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     additional_timesteps: 100000000
     heldout_tasks: 20
     heldout_task_seed: 1729
@@ -53,10 +50,10 @@ derived_expectations:
   warmup_optimizer_steps_per_distribution: 152
   consumed_timesteps_per_distribution: 99876864
   timestep_remainder_per_distribution: 123136
-  total_training_updates_per_stream: 2667
-  total_training_optimizer_steps_per_stream: 21336
-  total_training_warmup_optimizer_steps_per_stream: 1064
-  adaptation_probe_count: 7
+  total_training_updates_per_stream: 3810
+  total_training_optimizer_steps_per_stream: 30480
+  total_training_warmup_optimizer_steps_per_stream: 1520
+  adaptation_probe_count: 10
   updates_per_adaptation_probe: 381
   optimizer_steps_per_adaptation_probe: 3048
   warmup_optimizer_steps_per_adaptation_probe: 152

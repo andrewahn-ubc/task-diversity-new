@@ -117,8 +117,8 @@ def test_production_generation_spec_and_training_command_reserve_heldout_capacit
 ) -> None:
     config = SimpleNamespace(
         experiment=SimpleNamespace(
-            diversity_levels=(1, 16, 256, 4096, 65536),
-            num_distributions=7,
+            diversity_levels=(1, 4, 16, 64, 256, 1024, 4096, 16384, 65536),
+            num_distributions=10,
             adaptation=SimpleNamespace(heldout_tasks=20, heldout_task_seed=991),
         ),
         ruleset=SimpleNamespace(ruleset_base_seed=0, tree_depth=6),
@@ -131,20 +131,23 @@ def test_production_generation_spec_and_training_command_reserve_heldout_capacit
         return command[command.index(flag) + 1]
 
     assert SCHEMA_VERSION == 3
-    assert spec["num_train_distributions"] == 7
+    assert spec["num_train_distributions"] == 10
+    assert spec["num_rounds"] == 11
     assert spec["max_n"] == 256
+    assert spec["diversity_widths"] == [1, 2, 4, 8, 16, 32, 64, 128, 256]
     assert spec["heldout_n_per_depth"] == 20
     assert spec["ruleset_generation"]["heldout_interface"] == HELDOUT_GENERATOR_API
     assert argument_after("-m") == GENERATOR_MODULE
     assert argument_after("--n") == "256"
-    assert argument_after("--rounds") == "7"
+    assert argument_after("--rounds") == "10"
     assert argument_after("--max-topology-attempts") == str(
         MAX_TOPOLOGY_ATTEMPTS
     )
     assert argument_after("--max-new-unary-signatures-per-round") == str(
         MAX_NEW_UNARY_SIGNATURES_PER_TRAIN_ROUND
     )
-    assert _heldout_round_seed(master_seed=0, max_n=256, round_index=7) == 1_387_573_865
+    assert MAX_NEW_UNARY_SIGNATURES_PER_TRAIN_ROUND == 10
+    assert _heldout_round_seed(master_seed=0, max_n=256, round_index=10) == 1_263_838_259
 
 
 def _round_metadata(round_index: int, logical_n: int, prefix: str) -> dict:

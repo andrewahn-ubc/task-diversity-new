@@ -47,7 +47,10 @@ BANYAN_COLOR_STRIDE = 12
 DISTRACTOR_DENSITY = 0.5
 PACKED_PAD = np.uint32(5)
 MAX_TOPOLOGY_ATTEMPTS = 200_000
-MAX_NEW_UNARY_SIGNATURES_PER_TRAIN_ROUND = 15
+# Banyan has 120 possible unary producer signatures. Ten training rounds may
+# introduce at most 100 of them, reserving at least 20 for the disjoint held-out
+# round instead of exhausting the smallest producer-signature space.
+MAX_NEW_UNARY_SIGNATURES_PER_TRAIN_ROUND = 10
 GENERATOR_MODULE = "banyan_grid.tasks.make_depth6_round_disjoint_dataset"
 HELDOUT_GENERATOR_API = f"{GENERATOR_MODULE}._generate_round_dataset"
 SPAWN_CELLS = ((0, 0), (1, 0))

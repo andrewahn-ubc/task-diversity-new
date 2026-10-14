@@ -4,7 +4,7 @@ extends: experiment.yaml
 # smoke.yaml (which is deliberately tiny for local tests), this gate retains
 # the production environment count, rollout length, network widths, epochs,
 # and minibatches so an A100/H100 memory or compilation failure is caught
-# before the 50-stream array is released.
+# before the 45-stream PPO+CBP array is released.
 TOTAL_TIMESTEPS: 262144
 REW_SHAPING_HORIZON: 0
 NUM_SEEDS: 1

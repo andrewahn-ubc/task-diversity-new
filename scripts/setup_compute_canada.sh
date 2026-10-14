@@ -10,7 +10,7 @@ REPO_ROOT=$(td2_repo_root)
 BANYAN_COMMIT=7bb5d385cb2b48f49ab01d0c9a47b9d404e2ecc3
 PUREJAXRL_COMMIT=31756b197773a52db763fdbe6d635e4b46522a73
 RUNTIME_ROOT=/scratch/taegyoem/td2-runtime
-DATA_ROOT=/scratch/taegyoem/td2-data
+DATA_ROOT=/scratch/taegyoem/td2-data-10dist-9div-cbp
 
 usage() {
   cat <<'USAGE'
@@ -23,7 +23,7 @@ Options:
   --runtime-root PATH  Durable venv/wheel/source directory
                        (default: /scratch/taegyoem/td2-runtime)
   --data-root PATH     Durable generated-data directory
-                       (default: /scratch/taegyoem/td2-data)
+                       (default: /scratch/taegyoem/td2-data-10dist-9div-cbp)
   -h, --help           Show this help
 USAGE
 }
@@ -197,6 +197,9 @@ PYTHONNOUSERSITE=1 JAX_PLATFORMS=cpu \
   "$VENV_DIR/bin/python" -m td2.train --help >/dev/null
 PYTHONNOUSERSITE=1 JAX_PLATFORMS=cpu \
   "$VENV_DIR/bin/python" -m td2.prepare_data --help >/dev/null
+PYTHONNOUSERSITE=1 JAX_PLATFORMS=cpu \
+  "$VENV_DIR/bin/python" -m td2.plan \
+    --config "$REPO_ROOT/configs/experiment.yaml" counts >/dev/null
 PYTHONNOUSERSITE=1 MPLBACKEND=Agg \
   "$VENV_DIR/bin/python" -m td2.plot --help >/dev/null
 

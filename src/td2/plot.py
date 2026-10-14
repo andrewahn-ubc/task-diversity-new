@@ -387,7 +387,7 @@ def _line_plot(
     _boundaries(axis, config)
     axis.set(xlabel="Continual environment steps (millions)", ylabel=ylabel, title=title)
     axis.grid(axis="y", alpha=0.20)
-    axis.legend(ncol=2, fontsize=8, frameon=False)
+    axis.legend(ncol=min(5, max(1, len(widths))), fontsize=8, frameon=False)
     if ylabel == "Evaluation success rate":
         axis.set_ylim(-0.02, 1.02)
     for suffix in (".png", ".pdf"):
@@ -627,6 +627,22 @@ def _validate_coverage(
         suffix = " ..." if len(missing) > 8 else ""
         raise PlotDataError(
             f"{mode} metrics are incomplete ({len(missing)} missing streams): "
+            f"{preview}{suffix}"
+        )
+    unexpected = sorted(actual - expected)
+    if unexpected:
+        preview = ", ".join(
+            f"{method}/n={width}/seed={seed}"
+            + (
+                f"/stage={stage}"
+                if mode == "adapt"
+                else f"/distribution={stage}"
+            )
+            for method, width, seed, stage in unexpected[:8]
+        )
+        suffix = " ..." if len(unexpected) > 8 else ""
+        raise PlotDataError(
+            f"{mode} metrics contain {len(unexpected)} unexpected streams: "
             f"{preview}{suffix}"
         )
 

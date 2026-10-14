@@ -77,7 +77,7 @@ METRIC_FIELDS = (
 
 
 _STOP_REQUESTED = False
-PROTOCOL_VERSION = 5
+PROTOCOL_VERSION = 6
 
 
 def _request_stop(_signum, _frame) -> None:

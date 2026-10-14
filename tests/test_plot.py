@@ -7,11 +7,14 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from td2.config import load_config
 from td2.plot import (
+    PlotDataError,
     _adjacent_boundary_connectors,
     _aggregate_segmented_trajectory,
     _first_crossing,
     _seed_adaptation_summaries,
+    _validate_coverage,
     create_plots,
     read_metric_rows,
 )
@@ -171,6 +174,21 @@ def test_adaptation_summary_uses_seed_trajectories(tmp_path: Path) -> None:
     assert summaries[0]["normalized_auc"] == pytest.approx(0.55)
     assert math.isfinite(float(summaries[0]["time_to_threshold_steps"]))
     assert math.isnan(float(summaries[1]["time_to_threshold_steps"]))
+
+
+def test_coverage_rejects_an_unconfigured_baseline(tmp_path: Path) -> None:
+    rows = [
+        _row(method=method, distribution=distribution)
+        for method in ("ppo", "ppo_cbp")
+        for distribution in (1, 2)
+    ]
+    rows.append(_row(method="unconfigured", distribution=1))
+    _write_metrics(tmp_path / "metrics.csv", rows)
+
+    with pytest.raises(PlotDataError, match="unexpected streams"):
+        _validate_coverage(
+            read_metric_rows(tmp_path), load_config(SMOKE_CONFIG), mode="eval"
+        )
 
 
 def test_create_plots_writes_all_requested_artifacts(tmp_path: Path) -> None:
