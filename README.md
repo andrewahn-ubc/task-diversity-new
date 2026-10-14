@@ -15,7 +15,7 @@ creates the three requested aggregate plots only after every run is complete.
 
 First copy or clone this repository onto a filesystem visible to compute
 nodes, log into Narval as `taegyoem`, and `cd` to the repository root. The
-defaults are configured for account `def-mijungp` and a global GPU concurrency
+defaults are configured for account `def-krallen` and a global GPU concurrency
 cap of 100.
 
 ```bash
@@ -25,7 +25,7 @@ bash scripts/setup_compute_canada.sh \
 
 bash scripts/submit_all.sh \
   --cluster narval \
-  --account def-mijungp \
+  --account def-krallen \
   --data-root /scratch/taegyoem/td2-data-10dist-9div-cbp \
   --output-root /scratch/taegyoem/td2-results-10dist-9div-cbp \
   --max-concurrent 100
@@ -230,7 +230,7 @@ no `td2-*` jobs are queued or running, then use the same paths with `--resume`:
 ```bash
 bash scripts/submit_all.sh \
   --cluster narval \
-  --account def-mijungp \
+  --account def-krallen \
   --data-root /scratch/taegyoem/td2-data-10dist-9div-cbp \
   --output-root /scratch/taegyoem/td2-results-10dist-9div-cbp \
   --max-concurrent 100 \
