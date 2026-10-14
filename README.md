@@ -8,7 +8,7 @@ adaptation branches from every training-stage checkpoint.
 
 The cluster workflow is intentionally two commands. It builds a pinned,
 offline-capable CUDA environment, validates it on a real GPU, checkpoints
-inside every one-hour allocation, requeues incomplete array elements, and
+inside every one-hour GPU allocation, requeues incomplete array elements, and
 creates the three requested aggregate plots only after every run is complete.
 
 ## Quick start on Narval
@@ -182,10 +182,12 @@ artifacts.
 
 ## Scheduler design
 
-Every submitted batch file has `#SBATCH --time=01:00:00`. Main and adaptation
-workers use at most 2,700 seconds (45 minutes) of useful work, retain 15 minutes
-for compilation/checkpoint flex, and receive `USR1` ten minutes before Slurm's
-hard deadline. Checkpoints are content-addressed, checksummed, fsynced, and
+The CPU data-preparation job requests two hours and uses at most 5,400 seconds
+(90 minutes), retaining 30 minutes of flex. Every GPU job still requests one
+hour. Main and adaptation workers use at most 2,700 seconds (45 minutes) of
+useful work, retain 15 minutes for compilation/checkpoint flex, and receive
+`USR1` ten minutes before Slurm's hard deadline. Checkpoints are
+content-addressed, checksummed, fsynced, and
 published through an atomic pointer. State and metadata fall back together if
 the newest blob is corrupt, and every pointer is bound to hashes of the merged
 configuration and immutable data manifest. A successful incomplete job submits
@@ -210,10 +212,11 @@ each of the ten immutable stage checkpoints independently, so the scientific
 branching semantics are unchanged. `--max-concurrent 100` therefore caps this
 workflow at 100 simultaneous GPU tasks (the main phase has only 45). Slurm and
 your fair share determine how many actually run.
-The one-hour requests are scheduling-friendly, but no script can guarantee a
-five-day completion time without measuring throughput and queue delay on your
-allocation. The GPU smoke job fails the whole dependency chain before
-production if package, CUDA, compilation, or checkpoint validation fails.
+The one-hour GPU and two-hour CPU requests are scheduling-friendly, but no
+script can guarantee a five-day completion time without measuring throughput
+and queue delay on your allocation. The GPU smoke job fails the whole
+dependency chain before production if package, CUDA, compilation, or checkpoint
+validation fails.
 
 ## Monitoring and recovery
 

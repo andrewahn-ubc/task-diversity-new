@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --time=01:00:00
+#SBATCH --time=02:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
@@ -18,7 +18,7 @@ export JAX_PLATFORMS=cpu
 
 : "${TD2_DATA_ROOT:?TD2_DATA_ROOT is required}"
 td2_note "preparing immutable task, layout, distractor, and heldout manifests"
-timeout --signal=TERM --kill-after=240s 2700s \
+timeout --signal=TERM --kill-after=240s 5400s \
   "$TD2_VENV_DIR/bin/python" -m td2.prepare_data \
     --config "$REPO_ROOT/configs/experiment.yaml" \
     --output "$TD2_DATA_ROOT"
