@@ -182,8 +182,8 @@ artifacts.
 
 ## Scheduler design
 
-The CPU data-preparation job requests two hours and uses at most 5,400 seconds
-(90 minutes), retaining 30 minutes of flex. Every GPU job still requests one
+The CPU data-preparation job requests four hours and uses at most 10,800 seconds
+(three hours), retaining one hour of flex. Every GPU job still requests one
 hour. Main and adaptation workers use at most 2,700 seconds (45 minutes) of
 useful work, retain 15 minutes for compilation/checkpoint flex, and receive
 `USR1` ten minutes before Slurm's hard deadline. Checkpoints are
@@ -212,7 +212,7 @@ each of the ten immutable stage checkpoints independently, so the scientific
 branching semantics are unchanged. `--max-concurrent 100` therefore caps this
 workflow at 100 simultaneous GPU tasks (the main phase has only 45). Slurm and
 your fair share determine how many actually run.
-The one-hour GPU and two-hour CPU requests are scheduling-friendly, but no
+The one-hour GPU and four-hour CPU requests are scheduling-friendly, but no
 script can guarantee a five-day completion time without measuring throughput
 and queue delay on your allocation. The GPU smoke job fails the whole
 dependency chain before production if package, CUDA, compilation, or checkpoint
