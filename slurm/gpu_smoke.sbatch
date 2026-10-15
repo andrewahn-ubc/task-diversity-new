@@ -16,6 +16,9 @@ td2_require_command timeout
 : "${TD2_OUTPUT_ROOT:?TD2_OUTPUT_ROOT is required}"
 : "${TD2_DATA_ROOT:?TD2_DATA_ROOT is required}"
 : "${SLURM_JOB_ID:?SLURM_JOB_ID is required}"
+DATA_SEED=$("$TD2_VENV_DIR/bin/python" -m td2.plan \
+  --config "$REPO_ROOT/configs/experiment.yaml" data-seed --index 0)
+SEED_DATA_ROOT="$TD2_DATA_ROOT/seed_$DATA_SEED"
 
 td2_note "checking pinned packages, CUDA libraries, GPU execution, and XLA"
 "$TD2_VENV_DIR/bin/python" "$REPO_ROOT/scripts/check_runtime.py" --require-gpu
@@ -29,7 +32,7 @@ td2_run_checkpointable \
   "$TD2_VENV_DIR/bin/python" -m td2.train \
     --mode main \
     --config "$REPO_ROOT/configs/gpu_smoke.yaml" \
-    --data-root "$TD2_DATA_ROOT" \
+    --data-root "$SEED_DATA_ROOT" \
     --output-root "$SMOKE_ROOT" \
     --algorithm ppo_cbp \
     --diversity 1 \
@@ -48,7 +51,7 @@ td2_run_checkpointable \
   "$TD2_VENV_DIR/bin/python" -m td2.train \
     --mode main \
     --config "$REPO_ROOT/configs/gpu_smoke.yaml" \
-    --data-root "$TD2_DATA_ROOT" \
+    --data-root "$SEED_DATA_ROOT" \
     --output-root "$SMOKE_ROOT" \
     --algorithm ppo_cbp \
     --diversity 1 \

@@ -5,10 +5,11 @@ round-disjoint depth-six sampler at the largest requested pool width.  Smaller
 diversity conditions are *prefixes* of those arrays, which makes the comparison
 nested rather than independently resampled.  Each distribution receives a
 deterministic 40-object leaf pool from the paper's 80-object vocabulary.  A
-final logical n=20 round is generated with the same sampler and the blockers
-reconstructed from the training rounds.  It is padded only for the common
-on-disk row stride, and the manifest selects the 20 fixed task-layout pairs used
-for adaptation.
+final logical held-out round is generated with the same sampler and the
+blockers reconstructed from the training rounds.  It is padded only for the
+common on-disk row stride, and the manifest selects the fixed task-layout pairs
+used for adaptation.  One complete bundle is generated per learner seed, so
+replicates differ in both their training banks and held-out probes.
 
 Raw rounds are atomically retained in a specification-keyed sibling staging
 directory, so an interrupted data job resumes from the first missing round.
@@ -38,7 +39,7 @@ from td2.config import TD2Config, load_config
 
 
 BANYAN_COMMIT = "7bb5d385cb2b48f49ab01d0c9a47b9d404e2ecc3"
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 STAGING_PROTOCOL_VERSION = 1
 NUM_DEPTHS = 6
 GRID_SIZE = 6
@@ -95,6 +96,15 @@ def paper_leaf_pool_uids(
     return tuple(int(value) for value in selected)
 
 
+def _derived_seed(base_seed: int, data_seed: int, salt: int, index: int = 0) -> int:
+    """Derive a stable unsigned 32-bit seed for one data-bundle component."""
+
+    state = np.random.SeedSequence(
+        [int(base_seed), int(data_seed), int(salt), int(index)]
+    ).generate_state(1, dtype=np.uint32)
+    return int(state[0])
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -146,14 +156,33 @@ def _diversity_widths(config: TD2Config) -> tuple[int, ...]:
     return tuple(widths)
 
 
-def _generation_spec(config: TD2Config) -> dict[str, Any]:
+def _generation_spec(config: TD2Config, *, data_seed: int) -> dict[str, Any]:
     widths = _diversity_widths(config)
     num_rounds = config.experiment.num_distributions + 1
+    leaf_pool_seed = _derived_seed(
+        config.ruleset.ruleset_base_seed,
+        data_seed,
+        _POOL_SEED_SALT,
+    )
     leaf_pool_uids_by_round = [
         list(
             paper_leaf_pool_uids(
-                config.ruleset.ruleset_base_seed, round_index=round_index
+                leaf_pool_seed, round_index=round_index
             )
+        )
+        for round_index in range(num_rounds)
+    ]
+    layout_seed = _derived_seed(
+        config.experiment.adaptation.heldout_task_seed,
+        data_seed,
+        _LAYOUT_SEED_SALT,
+    )
+    distractor_seeds_by_round = [
+        _derived_seed(
+            config.experiment.adaptation.heldout_task_seed,
+            data_seed,
+            _DISTRACTOR_SEED_SALT,
+            round_index,
         )
         for round_index in range(num_rounds)
     ]
@@ -171,13 +200,15 @@ def _generation_spec(config: TD2Config) -> dict[str, Any]:
         # explicitly overrides it because Figure 6 evaluates depths 1..6.
         "attached_yaml_tree_depth": 4,
         "effective_tree_depth": config.ruleset.tree_depth,
-        # Production has max(widths)=256 >= 20 held-out pairs.  Keeping at
+        # Production has max(widths)=256 >= the held-out pair count. Keeping at
         # least heldout_tasks also makes the reduced smoke configuration valid.
         "max_n": max(max(widths), config.experiment.adaptation.heldout_tasks),
         "diversity_widths": list(widths),
         "diversity_levels_n2": [int(value) for value in config.experiment.diversity_levels],
         "ruleset_base_seed": config.ruleset.ruleset_base_seed,
-        "master_seed": config.runtime.seed,
+        "data_seed": int(data_seed),
+        "master_seed": int(data_seed),
+        "leaf_pool_seed": leaf_pool_seed,
         "pool_size": POOL_SIZE,
         "paper_object_vocabulary": {
             "items": PAPER_NUM_ITEMS,
@@ -195,6 +226,11 @@ def _generation_spec(config: TD2Config) -> dict[str, Any]:
         ),
         "heldout_tasks": config.experiment.adaptation.heldout_tasks,
         "heldout_task_seed": config.experiment.adaptation.heldout_task_seed,
+        "layout_seed": layout_seed,
+        "distractor_seeds_by_round": distractor_seeds_by_round,
+        "cross_seed_semantics": (
+            "each learner seed has an independently seeded training and held-out bundle"
+        ),
         "distractor_density": DISTRACTOR_DENSITY,
         "ruleset_generation": {
             "training_interface": HELDOUT_GENERATOR_API,
@@ -652,7 +688,7 @@ def _generate_heldout_round(
 
     Banyan's public CLI can generate only one ``n`` for every round.  Its final
     n=256 round is pathologically slow even though this experiment consumes
-    only 20 held-out tasks.  With the repository pinned, reconstructing the
+    fewer held-out tasks.  With the repository pinned, reconstructing the
     public generator's blocker sets and calling its underlying round function
     preserves its exact disjointness contract without sampling unused tasks.
     """
@@ -1021,11 +1057,17 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def prepare_data(config_path: str | Path, output: str | Path) -> dict[str, Any]:
+def prepare_data(
+    config_path: str | Path, output: str | Path, *, data_seed: int
+) -> dict[str, Any]:
     """Generate or verify the complete immutable experiment input bundle."""
 
     config = load_config(config_path)
-    spec = _generation_spec(config)
+    if data_seed not in config.runtime.seeds:
+        raise DataPreparationError(
+            f"data seed {data_seed} is not configured: {config.runtime.seeds}"
+        )
+    spec = _generation_spec(config, data_seed=data_seed)
     destination = Path(output).expanduser().resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
     existing = _verify_existing(destination, spec)
@@ -1077,7 +1119,7 @@ def prepare_data(config_path: str | Path, output: str | Path) -> dict[str, Any]:
             + int(spec["heldout_tasks"])
         )
         obstacle_masks, reachable_masks = generate_layout_masks(
-            total_layouts, seed=int(spec["heldout_task_seed"])
+            total_layouts, seed=int(spec["layout_seed"])
         )
         _validate_with_banyan_layout_helper(obstacle_masks, reachable_masks)
         layouts_path = temporary / "layouts.npz"
@@ -1104,7 +1146,7 @@ def prepare_data(config_path: str | Path, output: str | Path) -> dict[str, Any]:
                 )
             table, selected, universe = generate_distractor_table(
                 pool_uids,
-                seed=int(spec["heldout_task_seed"]) + round_index,
+                seed=int(spec["distractor_seeds_by_round"][round_index]),
                 density=float(spec["distractor_density"]),
             )
             table_path = _distractor_path(ruleset_path)
@@ -1147,12 +1189,14 @@ def prepare_data(config_path: str | Path, output: str | Path) -> dict[str, Any]:
                     "pairs": pairs,
                     "fixed_across_training_stages": True,
                     "fixed_across_diversity_streams": True,
+                    "fixed_across_seeds": False,
                 }
 
         if heldout_record is None:
             raise DataPreparationError("held-out round was not created")
         manifest: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
+            "data_seed": int(spec["data_seed"]),
             "generation_spec": spec,
             "banyan_commit": BANYAN_COMMIT,
             "num_train_distributions": int(spec["num_train_distributions"]),
@@ -1204,15 +1248,16 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--seed", required=True, type=int)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
-    manifest = prepare_data(args.config, args.output)
+    manifest = prepare_data(args.config, args.output, data_seed=args.seed)
     print(
         f"Prepared {manifest['num_train_distributions']} training distributions "
-        f"and one held-out round at {args.output.resolve()}"
+        f"and one held-out round for seed {args.seed} at {args.output.resolve()}"
     )
     return 0
 

@@ -109,7 +109,9 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _protocol_identity(config: TD2Config, data_root: Path) -> dict[str, Any]:
+def _protocol_identity(
+    config: TD2Config, data_root: Path, *, expected_data_seed: int
+) -> dict[str, Any]:
     config_digest = hashlib.sha256()
     for source in config.source_files:
         config_digest.update(source.name.encode("utf-8"))
@@ -126,10 +128,17 @@ def _protocol_identity(config: TD2Config, data_root: Path) -> dict[str, Any]:
             f"data manifest checksum mismatch: {manifest_digest} != {expected_digest}"
         )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest_seed = manifest.get("data_seed")
+    if manifest_seed != expected_data_seed:
+        raise CheckpointError(
+            f"data bundle seed mismatch: manifest has {manifest_seed!r}, "
+            f"learner requires {expected_data_seed}"
+        )
     return {
         "protocol_version": PROTOCOL_VERSION,
         "config_sha256": config_digest.hexdigest(),
         "data_manifest_sha256": manifest_digest,
+        "data_seed": int(manifest_seed),
         "banyan_commit": manifest.get("banyan_commit"),
     }
 
@@ -589,7 +598,9 @@ def _stage_complete(
 
 def _run_main(args, config: TD2Config, diversity_n: int, stream_root: Path) -> bool:
     schedule = config.derived.training_per_distribution
-    protocol_identity = _protocol_identity(config, args.data_root)
+    protocol_identity = _protocol_identity(
+        config, args.data_root, expected_data_seed=args.seed
+    )
     resume_root = stream_root / "resume"
     if (resume_root / "latest.json").exists() or (resume_root / "previous.json").exists():
         pointer_metadata = checkpoint_metadata(resume_root)
@@ -936,7 +947,9 @@ def _load_parent_learner(
 
 def _run_adapt(args, config: TD2Config, diversity_n: int, stream_root: Path) -> bool:
     assert args.stage is not None
-    protocol_identity = _protocol_identity(config, args.data_root)
+    protocol_identity = _protocol_identity(
+        config, args.data_root, expected_data_seed=args.seed
+    )
     schedule = config.derived.adaptation_per_probe
     if schedule is None:
         raise ValueError("adaptation is disabled in the configuration")

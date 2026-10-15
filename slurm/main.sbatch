@@ -34,6 +34,7 @@ PLAN_ITEM=$("$TD2_VENV_DIR/bin/python" -m td2.plan \
 IFS=$'\t' read -r ALGORITHM DIVERSITY SEED <<<"$PLAN_ITEM"
 [[ -n $ALGORITHM && -n $DIVERSITY && -n $SEED ]] || td2_die \
   "could not decode main stream index $STREAM_INDEX"
+SEED_DATA_ROOT="$TD2_DATA_ROOT/seed_$SEED"
 SOFT_LIMIT=${TD2_SOFT_LIMIT_SECONDS:-2700}
 td2_require_uint soft-time-limit-seconds "$SOFT_LIMIT"
 ((SOFT_LIMIT >= 300 && SOFT_LIMIT <= 2700)) || td2_die \
@@ -60,7 +61,7 @@ td2_run_checkpointable \
   "$TD2_VENV_DIR/bin/python" -m td2.train \
     --mode main \
     --config "$REPO_ROOT/configs/experiment.yaml" \
-    --data-root "$TD2_DATA_ROOT" \
+    --data-root "$SEED_DATA_ROOT" \
     --output-root "$TD2_OUTPUT_ROOT" \
     --algorithm "$ALGORITHM" \
     --diversity "$DIVERSITY" \

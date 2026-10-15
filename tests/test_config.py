@@ -48,6 +48,7 @@ def test_default_experiment_contract_and_derived_schedule() -> None:
     )
     assert config.experiment.methods == ("ppo_cbp",)
     assert config.experiment.adaptation.after_distributions == tuple(range(1, 11))
+    assert config.experiment.adaptation.heldout_tasks == 100
     assert "full ten-distribution sequence" in config.experiment.ambiguity_resolution
     assert config.runtime.seeds == (0, 1, 2, 3, 4)
 

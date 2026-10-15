@@ -23,6 +23,12 @@ class AdaptationWorkItem(MainWorkItem):
     stage: int
 
 
+def data_seeds(config: TD2Config) -> tuple[int, ...]:
+    """Return the learner seeds that each require an immutable data bundle."""
+
+    return config.runtime.seeds
+
+
 def main_work_items(config: TD2Config) -> tuple[MainWorkItem, ...]:
     return tuple(
         MainWorkItem(algorithm, diversity_n2, seed)
@@ -69,7 +75,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", required=True, type=Path)
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("counts")
+    subparsers.add_parser("data-count")
     subparsers.add_parser("identity")
+    seed = subparsers.add_parser("data-seed")
+    seed.add_argument("--index", required=True, type=int)
     main = subparsers.add_parser("main")
     main.add_argument("--index", required=True, type=int)
     adapt = subparsers.add_parser("adapt")
@@ -84,8 +93,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     adaptations = adaptation_work_items(config)
     if args.command == "counts":
         print(f"{len(mains)}\t{len(adaptations)}")
+    elif args.command == "data-count":
+        print(len(data_seeds(config)))
     elif args.command == "identity":
         print(plan_identity(config))
+    elif args.command == "data-seed":
+        print(_indexed(data_seeds(config), args.index, "data seed"))
     elif args.command == "main":
         item = _indexed(mains, args.index, "main")
         assert isinstance(item, MainWorkItem)

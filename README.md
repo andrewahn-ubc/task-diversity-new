@@ -21,13 +21,13 @@ cap of 100.
 ```bash
 bash scripts/setup_compute_canada.sh \
   --runtime-root /scratch/taegyoem/td2-runtime \
-  --data-root /scratch/taegyoem/td2-data-10dist-9div-cbp
+  --data-root /scratch/taegyoem/td2-data-10dist-9div-cbp-seeded100
 
 bash scripts/submit_all.sh \
   --cluster narval \
   --account def-krallen \
-  --data-root /scratch/taegyoem/td2-data-10dist-9div-cbp \
-  --output-root /scratch/taegyoem/td2-results-10dist-9div-cbp \
+  --data-root /scratch/taegyoem/td2-data-10dist-9div-cbp-seeded100 \
+  --output-root /scratch/taegyoem/td2-results-10dist-9div-cbp-seeded100 \
   --max-concurrent 100
 ```
 
@@ -60,7 +60,7 @@ active.
 | Actual per-stage budget | 381 updates × 2048 envs × 128 steps = 99,876,864 steps |
 | Main streams | 1 method × 9 diversities × 5 seeds = 45 |
 | Adaptation probes | 10 checkpoints per main stream = 450 branches |
-| Held-out probe | the same 20 unseen task-tree/layout pairs for every stage, diversity, and seed |
+| Held-out probe | 100 unseen task-tree/layout pairs per seed, fixed across that seed's stages and diversities |
 | Adaptation budget | another 99,876,864 actual steps per branch (100M nominal) |
 | Total work | 89,889,177,600 actual environment steps, split evenly between main and adaptation runs |
 
@@ -71,8 +71,9 @@ axes separately, and never silently rounds the budget upward.
 Each adaptation branch loads the complete immutable parent learner state:
 parameters, Adam moments and per-parameter counters, and—under CBP—unit ages
 and utility estimates. It resets the environment, GRU carry, and a branch-local
-learning-rate schedule, trains only on the fixed held-out set, and writes to a
-separate directory. No branch can alter the original continual trajectory.
+learning-rate schedule, trains only on its seed's fixed 100-task held-out set,
+and writes to a separate directory. No branch can alter the original continual
+trajectory.
 
 ## PPO and CBP implementation
 
@@ -153,20 +154,26 @@ the authors' learned float-observation embedding. `RULESET_EMBED_DIM` remains
 inactive because task rules are deliberately hidden from the observation.
 
 Task generation uses the released Banyan depth-six, cross-round-disjoint
-generator at commit `7bb5d385cb2b48f49ab01d0c9a47b9d404e2ecc3`. Lower
-diversities are nested prefixes of the `n=256` task and layout banks. Layout
-masks and depth-six topologies are disjoint across rounds, and producer
-signatures do not repeat across rounds. The ten training rounds use Banyan's
-same pinned per-round sampler at `n=256`, with its default 20,000-attempt retry
-budget and a cap of 10 new unary producer signatures per training round,
-reserving at least 20 of the 120 possible unary signatures for the disjoint
-held-out round. Completed raw rounds are atomically staged and reused after an
-interruption instead of restarting at round one.
-The fixed held-out set uses the same pinned sampler at logical `n=20`, after
-reconstructing all training blocker sets, and is padded only to the common
-on-disk stride. This avoids sampling an unused eleventh `n=256` round. Because
-the held-out call uses a private function, its exact API name, commit, seed
-derivation, logical/storage widths, and hashes are recorded in the manifest.
+generator at commit `7bb5d385cb2b48f49ab01d0c9a47b9d404e2ecc3`. Each learner
+seed gets its own immutable bundle under `DATA_ROOT/seed_<seed>`, containing
+ten training banks and one 100-task held-out set. Within one seed, all nine
+diversity streams share those banks and lower diversities are nested prefixes
+of the `n=256` task and layout banks. Thus comparisons across diversity are
+paired within a seed, while different learner seeds use independently seeded
+training and held-out tasks. Layout masks and depth-six topologies are disjoint
+across rounds within each bundle, and producer signatures do not repeat across
+rounds. The ten training rounds use Banyan's same pinned per-round sampler at
+`n=256`, with its default 20,000-attempt retry budget and a cap of 10 new unary
+producer signatures per training round, reserving at least 20 of the 120
+possible unary signatures for the disjoint held-out round. Completed raw rounds
+are atomically staged and reused after an interruption instead of restarting at
+round one.
+Each seed's fixed held-out set uses the same pinned sampler at logical `n=100`,
+after reconstructing all training blocker sets, and is padded only to the
+common on-disk stride. This avoids sampling an unused eleventh `n=256` round.
+Because the held-out call uses a private function, its exact API name, commit,
+seed derivation, logical/storage widths, and hashes are recorded in that
+seed's manifest.
 
 The paper states that each distribution's leaves come from a 40-object pool
 sampled from an 8-shape × 10-color vocabulary; the manifest records each
@@ -183,10 +190,11 @@ artifacts.
 
 ## Scheduler design
 
-The CPU data-preparation job requests four hours without a shorter hidden
-watchdog; every completed task-distribution round remains resumable if the job
-is interrupted. Every GPU job still requests one hour. Main and adaptation
-workers use at most 2,700 seconds (45 minutes) of
+Data preparation is a five-element CPU array, one independently seeded bundle
+per learner seed. Each element requests four hours without a shorter hidden
+watchdog; every completed task-distribution round remains resumable if an
+element is interrupted. Every GPU job still requests one hour. Main and
+adaptation workers use at most 2,700 seconds (45 minutes) of
 useful work, retain 15 minutes for compilation/checkpoint flex, and receive
 `USR1` ten minutes before Slurm's hard deadline. Checkpoints are
 content-addressed, checksummed, fsynced, and
@@ -199,7 +207,7 @@ immutable checkpoint and `DONE` marker before the held-out phase begins.
 The dependency graph is:
 
 ```text
-CPU data preparation
+5-way CPU data preparation array
   -> real-GPU package/CUDA/PPO+CBP smoke gate
     -> 45-way PPO+CBP main array
        -> 450-way held-out adaptation array
@@ -226,8 +234,11 @@ Inspect jobs and logs with:
 
 ```bash
 squeue --me
-tail -f /scratch/taegyoem/td2-results-10dist-9div-cbp/slurm-logs/*.out
+tail -f /scratch/taegyoem/td2-results-10dist-9div-cbp-seeded100/slurm-logs/*.out
 ```
+
+Data-preparation logs are named `data-<array-job-id>_<seed-index>.out`; main
+and adaptation logs use the corresponding Slurm array job and task IDs.
 
 Normal continuation is automatic. If jobs are cancelled or fail, wait until
 no `td2-*` jobs are queued or running, then use the same paths with `--resume`:
@@ -236,8 +247,8 @@ no `td2-*` jobs are queued or running, then use the same paths with `--resume`:
 bash scripts/submit_all.sh \
   --cluster narval \
   --account def-krallen \
-  --data-root /scratch/taegyoem/td2-data-10dist-9div-cbp \
-  --output-root /scratch/taegyoem/td2-results-10dist-9div-cbp \
+  --data-root /scratch/taegyoem/td2-data-10dist-9div-cbp-seeded100 \
+  --output-root /scratch/taegyoem/td2-results-10dist-9div-cbp-seeded100 \
   --max-concurrent 100 \
   --resume
 ```
@@ -245,8 +256,9 @@ bash scripts/submit_all.sh \
 Resume verifies that no Task Diversity jobs are active, revalidates data and
 the GPU runtime, and continues only incomplete checkpoints. Reusing an output
 root without `--resume` fails closed, which prevents accidental duplicate
-experiments. The old seven-distribution data and result roots are scientifically
-incompatible with this protocol; do not pass them to `--resume`.
+experiments. The old seven-distribution data and result roots, and any earlier
+shared 20-task data bundle, are scientifically incompatible with this
+protocol; do not pass them to `--resume`.
 
 ## Results
 

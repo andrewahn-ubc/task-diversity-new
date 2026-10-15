@@ -36,6 +36,7 @@ IFS=$'\t' read -r TD2_ALGORITHM TD2_DIVERSITY TD2_SEED TD2_STAGE \
 [[ -n $TD2_ALGORITHM && -n $TD2_DIVERSITY && -n $TD2_SEED \
    && -n $TD2_STAGE ]] || td2_die \
   "could not decode adaptation index $ADAPT_INDEX"
+SEED_DATA_ROOT="$TD2_DATA_ROOT/seed_$TD2_SEED"
 SOFT_LIMIT=${TD2_SOFT_LIMIT_SECONDS:-2700}
 td2_require_uint soft-time-limit-seconds "$SOFT_LIMIT"
 ((SOFT_LIMIT >= 300 && SOFT_LIMIT <= 2700)) || td2_die \
@@ -61,7 +62,7 @@ td2_run_checkpointable \
   "$TD2_VENV_DIR/bin/python" -m td2.train \
     --mode adapt \
     --config "$REPO_ROOT/configs/experiment.yaml" \
-    --data-root "$TD2_DATA_ROOT" \
+    --data-root "$SEED_DATA_ROOT" \
     --output-root "$TD2_OUTPUT_ROOT" \
     --algorithm "$TD2_ALGORITHM" \
     --diversity "$TD2_DIVERSITY" \

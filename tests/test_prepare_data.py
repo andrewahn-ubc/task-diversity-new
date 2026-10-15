@@ -117,25 +117,36 @@ def test_production_generation_spec_reserves_heldout_capacity() -> None:
         experiment=SimpleNamespace(
             diversity_levels=(1, 4, 16, 64, 256, 1024, 4096, 16384, 65536),
             num_distributions=10,
-            adaptation=SimpleNamespace(heldout_tasks=20, heldout_task_seed=991),
+            adaptation=SimpleNamespace(heldout_tasks=100, heldout_task_seed=991),
         ),
         ruleset=SimpleNamespace(ruleset_base_seed=0, tree_depth=6),
         runtime=SimpleNamespace(seed=0),
     )
-    spec = _generation_spec(config)
+    spec = _generation_spec(config, data_seed=3)
+    other_seed_spec = _generation_spec(config, data_seed=4)
 
-    assert SCHEMA_VERSION == 4
+    assert SCHEMA_VERSION == 5
     assert spec["num_train_distributions"] == 10
     assert spec["num_rounds"] == 11
     assert spec["max_n"] == 256
+    assert spec["data_seed"] == 3
+    assert spec["master_seed"] == 3
     assert spec["diversity_widths"] == [1, 2, 4, 8, 16, 32, 64, 128, 256]
-    assert spec["heldout_n_per_depth"] == 20
+    assert spec["heldout_n_per_depth"] == 100
+    assert spec["heldout_tasks"] == 100
     assert spec["ruleset_generation"]["heldout_interface"] == HELDOUT_GENERATOR_API
     assert spec["ruleset_generation"]["training_interface"] == HELDOUT_GENERATOR_API
     assert spec["ruleset_generation"]["resumable_round_staging"] is True
     assert len(spec["leaf_pool_uids_by_round"]) == 11
     assert all(len(pool) == 40 for pool in spec["leaf_pool_uids_by_round"])
     assert len({tuple(pool) for pool in spec["leaf_pool_uids_by_round"]}) == 11
+    assert spec["leaf_pool_uids_by_round"] != other_seed_spec[
+        "leaf_pool_uids_by_round"
+    ]
+    assert spec["layout_seed"] != other_seed_spec["layout_seed"]
+    assert spec["distractor_seeds_by_round"] != other_seed_spec[
+        "distractor_seeds_by_round"
+    ]
     assert spec["ruleset_generation"]["max_topology_attempts"] == (
         MAX_TOPOLOGY_ATTEMPTS
     )

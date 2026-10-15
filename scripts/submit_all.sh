@@ -9,7 +9,7 @@ REPO_ROOT=$(td2_repo_root)
 
 CLUSTER=narval
 ACCOUNT=def-krallen
-OUTPUT_ROOT=/scratch/taegyoem/td2-results-10dist-9div-cbp
+OUTPUT_ROOT=/scratch/taegyoem/td2-results-10dist-9div-cbp-seeded100
 DATA_ROOT=''
 MAX_CONCURRENT=100
 RESUME=false
@@ -18,16 +18,16 @@ usage() {
   cat <<'USAGE'
 Usage: bash scripts/submit_all.sh [options]
 
-Submits a CPU data-preparation job, a gated one-GPU smoke test, the 45-stream
-production array (1 algorithm x 9 diversity levels x 5 seeds), the 450-branch
-held-out array, and final aggregation.
+Submits a five-seed CPU data-preparation array, a gated one-GPU smoke test, the
+45-stream production array (1 algorithm x 9 diversity levels x 5 seeds), the
+450-branch held-out array, and final aggregation.
 Run it on the login node of the cluster named by --cluster.
 
 Options:
   --cluster NAME       Slurm cluster (default: narval)
   --account ACCOUNT    Allocation account (default: def-krallen)
   --output-root PATH   Experiment output
-                       (default: /scratch/taegyoem/td2-results-10dist-9div-cbp)
+                       (default: /scratch/taegyoem/td2-results-10dist-9div-cbp-seeded100)
   --data-root PATH     Prepared data (default: value saved by setup)
   --max-concurrent N   Global GPU-array concurrency cap (default: 100; 1-100)
   --resume             Resume checkpoints in an existing output root. Refuses
@@ -91,6 +91,8 @@ td2_load_profile "$REPO_ROOT" "$CLUSTER"
 
 PLAN_COUNTS=$("$TD2_VENV_DIR/bin/python" -m td2.plan \
   --config "$REPO_ROOT/configs/experiment.yaml" counts)
+DATA_ARRAY_SIZE=$("$TD2_VENV_DIR/bin/python" -m td2.plan \
+  --config "$REPO_ROOT/configs/experiment.yaml" data-count)
 PLAN_IDENTITY=$("$TD2_VENV_DIR/bin/python" -m td2.plan \
   --config "$REPO_ROOT/configs/experiment.yaml" identity)
 [[ $PLAN_IDENTITY =~ ^[0-9a-f]{64}$ ]] || td2_die \
@@ -98,8 +100,12 @@ PLAN_IDENTITY=$("$TD2_VENV_DIR/bin/python" -m td2.plan \
 IFS=$'\t' read -r MAIN_ARRAY_SIZE ADAPT_ARRAY_SIZE <<<"$PLAN_COUNTS"
 td2_require_uint main-array-size "$MAIN_ARRAY_SIZE"
 td2_require_uint adaptation-array-size "$ADAPT_ARRAY_SIZE"
+td2_require_uint data-array-size "$DATA_ARRAY_SIZE"
 ((MAIN_ARRAY_SIZE == 45 && ADAPT_ARRAY_SIZE == 450)) || td2_die \
   "unexpected production plan: main=$MAIN_ARRAY_SIZE adaptation=$ADAPT_ARRAY_SIZE"
+((DATA_ARRAY_SIZE == 5)) || td2_die \
+  "unexpected production data-seed count: $DATA_ARRAY_SIZE"
+DATA_ARRAY_MAX=$((DATA_ARRAY_SIZE - 1))
 MAIN_ARRAY_MAX=$((MAIN_ARRAY_SIZE - 1))
 ADAPT_ARRAY_MAX=$((ADAPT_ARRAY_SIZE - 1))
 
@@ -174,12 +180,13 @@ fi
 EXPORTS="ALL,TD2_RUNTIME_ENV=$TD2_RUNTIME_ENV,TD2_PROFILE=$CLUSTER,TD2_ACCOUNT=$ACCOUNT,TD2_OUTPUT_ROOT=$OUTPUT_ROOT,TD2_DATA_ROOT=$DATA_ROOT,TD2_SOFT_LIMIT_SECONDS=2700"
 td2_build_gpu_sbatch_args
 
-td2_note "submitting deterministic data preparation"
+td2_note "submitting $DATA_ARRAY_SIZE deterministic per-seed data bundles"
 DATA_SUBMISSION=$(sbatch --parsable \
   --account="$ACCOUNT" \
   --chdir="$REPO_ROOT" \
   --job-name=td2-data \
-  --output="$LOG_ROOT/data-%j.out" \
+  --output="$LOG_ROOT/data-%A_%a.out" \
+  --array="0-$DATA_ARRAY_MAX" \
   --export="$EXPORTS" \
   "$REPO_ROOT/slurm/prepare_data.sbatch")
 DATA_JOB=$(td2_parse_job_id "$DATA_SUBMISSION")
@@ -259,6 +266,7 @@ td2_write_receipt "$RECEIPT" \
   "plan_identity=$PLAN_IDENTITY" \
   "max_concurrent=$MAX_CONCURRENT" \
   "data_job=$DATA_JOB" \
+  "data_array_size=$DATA_ARRAY_SIZE" \
   "smoke_job=$SMOKE_JOB" \
   "main_array_job=$MAIN_JOB" \
   "main_array_size=$MAIN_ARRAY_SIZE" \
@@ -268,7 +276,7 @@ td2_write_receipt "$RECEIPT" \
   "soft_limit_seconds=2700"
 
 printf '\nSubmitted successfully:\n'
-printf '  data preparation: %s\n' "$DATA_JOB"
+printf '  data array:        %s (%s seeds)\n' "$DATA_JOB" "$DATA_ARRAY_SIZE"
 printf '  GPU smoke gate:   %s\n' "$SMOKE_JOB"
 printf '  main array:       %s (%s tasks)\n' "$MAIN_JOB" "$MAIN_ARRAY_SIZE"
 printf '  adaptation array: %s (%s tasks)\n' "$ADAPT_JOB" "$ADAPT_ARRAY_SIZE"

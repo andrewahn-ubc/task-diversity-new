@@ -4,7 +4,7 @@ from dataclasses import astuple
 from pathlib import Path
 
 from td2.config import load_config
-from td2.plan import adaptation_work_items, main_work_items, plan_identity
+from td2.plan import adaptation_work_items, data_seeds, main_work_items, plan_identity
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,9 +13,11 @@ EXPERIMENT_CONFIG = ROOT / "configs" / "experiment.yaml"
 
 def test_production_work_plan_is_complete_unique_and_stably_ordered() -> None:
     config = load_config(EXPERIMENT_CONFIG)
+    seeds = data_seeds(config)
     mains = main_work_items(config)
     adaptations = adaptation_work_items(config)
 
+    assert seeds == (0, 1, 2, 3, 4)
     assert len(mains) == 45
     assert len(set(mains)) == 45
     assert astuple(mains[0]) == ("ppo_cbp", 1, 0)
