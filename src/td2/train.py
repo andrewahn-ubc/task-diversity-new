@@ -77,7 +77,7 @@ METRIC_FIELDS = (
 
 
 _STOP_REQUESTED = False
-PROTOCOL_VERSION = 6
+PROTOCOL_VERSION = 7
 
 
 def _request_stop(_signum, _frame) -> None:
@@ -167,6 +167,14 @@ def _stream_root(
     if mode == "main":
         return (
             output_root
+            / algorithm
+            / f"diversity_{diversity_n2}"
+            / f"seed_{seed}"
+        )
+    if mode == "fixed":
+        return (
+            output_root
+            / "fixed"
             / algorithm
             / f"diversity_{diversity_n2}"
             / f"seed_{seed}"
@@ -261,6 +269,23 @@ def _main_axis_steps(
     return nominal, actual, boundary
 
 
+def _fixed_axis_steps(
+    schedule: RunSchedule, *, update_in_phase: int
+) -> tuple[int, int]:
+    """Map cumulative fixed-stream updates onto the main experiment's 1B axis."""
+
+    if update_in_phase <= 0:
+        return 0, 0
+    completed_blocks = (update_in_phase - 1) // schedule.num_updates
+    within_block = update_in_phase - completed_blocks * schedule.num_updates
+    nominal = (
+        completed_blocks * schedule.requested_timesteps
+        + within_block * schedule.environment_steps_per_update
+    )
+    actual = update_in_phase * schedule.environment_steps_per_update
+    return nominal, actual
+
+
 def _metric_base(
     *,
     algorithm: str,
@@ -279,6 +304,13 @@ def _metric_base(
         environment_steps = int(source_distribution) * 100_000_000
         actual_environment_steps = global_update * schedule.environment_steps_per_update
         nominal_environment_steps = environment_steps
+    elif mode.startswith("fixed"):
+        environment_steps, actual_environment_steps = _fixed_axis_steps(
+            schedule,
+            update_in_phase=update_in_phase,
+        )
+        nominal_environment_steps = environment_steps
+        adaptation_steps = ""
     else:
         environment_steps, actual_environment_steps, _ = _main_axis_steps(
             schedule,
@@ -743,6 +775,7 @@ def _run_main(args, config: TD2Config, diversity_n: int, stream_root: Path) -> b
                 atomic_marker(stream_root / "DONE", metadata)
                 return True
 
+            completed_distribution = distribution
             distribution += 1
             env, pool = _environment(
                 config,
@@ -795,6 +828,12 @@ def _run_main(args, config: TD2Config, diversity_n: int, stream_root: Path) -> b
                 )
             )
             last_checkpoint = time.monotonic()
+            if args.stop_after_distribution == completed_distribution:
+                # The immutable stage checkpoint is the shared branch point.
+                # Persist the main stream's next-distribution state before
+                # returning so its continuation neither repeats evaluation nor
+                # performs any extra PPO update in the shared-prefix job.
+                return False
             continue
 
         if update_in_phase == 0 and evaluate is not None:
@@ -896,7 +935,7 @@ def _run_main(args, config: TD2Config, diversity_n: int, stream_root: Path) -> b
     return False
 
 
-def _load_parent_learner(
+def _load_parent_runner(
     args,
     config: TD2Config,
     diversity_n: int,
@@ -942,7 +981,248 @@ def _load_parent_learner(
     if int(metadata.get("distribution", -1)) != stage:
         raise CheckpointError("parent checkpoint stage mismatch")
     _validate_checkpoint_counters(metadata, parent)
+    return parent
+
+
+def _load_parent_learner(
+    args,
+    config: TD2Config,
+    diversity_n: int,
+    stage: int,
+    protocol_identity: Mapping[str, Any],
+):
+    parent = _load_parent_runner(
+        args, config, diversity_n, stage, protocol_identity
+    )
     return parent.learner, parent.global_update
+
+
+def _run_fixed(args, config: TD2Config, diversity_n: int, stream_root: Path) -> bool:
+    """Continue the immutable distribution-1 checkpoint to the 1B-step horizon."""
+
+    schedule = config.derived.training_per_distribution
+    protocol_identity = _protocol_identity(
+        config, args.data_root, expected_data_seed=args.seed
+    )
+    env, _ = _environment(
+        config,
+        args.data_root,
+        active_n=diversity_n,
+        distribution_index=0,
+        num_envs=config.ppo.num_envs,
+    )
+    components = build_components(config, env, algorithm=args.algorithm)
+    parent = _load_parent_runner(
+        args, config, diversity_n, 1, protocol_identity
+    )
+    expected_parent_counters = {
+        "update_in_phase": schedule.num_updates,
+        "global_update": schedule.num_updates,
+        "optimizer_steps": schedule.total_optimizer_steps,
+        "schedule_step": schedule.total_optimizer_steps,
+    }
+    actual_parent_counters = {
+        "update_in_phase": _as_int(parent.update_in_phase),
+        "global_update": _as_int(parent.global_update),
+        "optimizer_steps": _as_int(parent.learner.optimizer_steps),
+        "schedule_step": _as_int(parent.learner.schedule_step),
+    }
+    if actual_parent_counters != expected_parent_counters:
+        raise CheckpointError(
+            "fixed branch requires the exact stage-1 checkpoint: "
+            f"{actual_parent_counters} != {expected_parent_counters}"
+        )
+
+    resume_root = stream_root / "resume"
+    if (resume_root / "latest.json").exists() or (resume_root / "previous.json").exists():
+        pointer_metadata = checkpoint_metadata(resume_root)
+        _validate_identity(
+            pointer_metadata,
+            mode="fixed",
+            algorithm=args.algorithm,
+            diversity_n=diversity_n,
+            seed=args.seed,
+            protocol_identity=protocol_identity,
+        )
+        runner, metadata = load_checkpoint_with_metadata(resume_root, parent)
+        _validate_identity(
+            metadata,
+            mode="fixed",
+            algorithm=args.algorithm,
+            diversity_n=diversity_n,
+            seed=args.seed,
+            protocol_identity=protocol_identity,
+        )
+        _validate_checkpoint_counters(metadata, runner)
+        if int(metadata.get("distribution", -1)) != 1 or int(
+            metadata.get("source_distribution", -1)
+        ) != 1:
+            raise CheckpointError("fixed checkpoint source distribution mismatch")
+    else:
+        runner = parent
+
+    target_updates = config.derived.total_training_updates_per_stream
+    if _as_int(runner.update_in_phase) < schedule.num_updates:
+        raise CheckpointError("fixed checkpoint predates the shared 100M prefix")
+    if _as_int(runner.global_update) != _as_int(runner.update_in_phase):
+        raise CheckpointError("fixed checkpoint update counters diverged")
+
+    metrics_path = stream_root / "metrics.csv"
+    evaluation_interval = max(
+        1, round(10_000_000 / schedule.environment_steps_per_update)
+    )
+    update_fn = make_update_fn(
+        config,
+        components,
+        env,
+        total_optimizer_steps=(
+            config.derived.total_training_optimizer_steps_per_stream
+        ),
+        warmup_optimizer_steps=(
+            config.derived.total_training_warmup_optimizer_steps_per_stream
+        ),
+    )
+    evaluate = (
+        None
+        if config.profiling.disable_evaluation
+        else _evaluation_bundle(
+            config,
+            components,
+            args.data_root,
+            diversity_n=diversity_n,
+            distribution=1,
+            heldout=False,
+        )
+    )
+    started = time.monotonic()
+    last_checkpoint = started
+    recent_durations: list[float] = []
+
+    while _as_int(runner.update_in_phase) < target_updates:
+        update_started = time.monotonic()
+        runner, metrics = update_fn(runner)
+        jax.block_until_ready(runner)
+        duration = time.monotonic() - update_started
+        recent_durations = (recent_durations + [duration])[-5:]
+        _write_training_metric(
+            metrics_path,
+            metrics,
+            algorithm=args.algorithm,
+            diversity_n=diversity_n,
+            seed=args.seed,
+            mode="fixed_train",
+            distribution=1,
+            runner=runner,
+            schedule=schedule,
+            source_distribution=1,
+        )
+
+        update_in_phase = _as_int(runner.update_in_phase)
+        if evaluate is not None and update_in_phase % evaluation_interval == 0:
+            evaluation = evaluate(
+                runner.learner.params,
+                _eval_key(
+                    seed=args.seed,
+                    diversity_n2=diversity_n * diversity_n,
+                    distribution=1,
+                    update=update_in_phase,
+                    heldout=False,
+                ),
+            )
+            jax.block_until_ready(evaluation)
+            _write_evaluation_metric(
+                metrics_path,
+                evaluation,
+                algorithm=args.algorithm,
+                diversity_n=diversity_n,
+                seed=args.seed,
+                mode="fixed_eval",
+                distribution=1,
+                runner=runner,
+                schedule=schedule,
+                source_distribution=1,
+            )
+
+        now = time.monotonic()
+        if now - last_checkpoint >= args.checkpoint_interval_seconds:
+            _save_resume(
+                stream_root,
+                runner,
+                mode="fixed",
+                algorithm=args.algorithm,
+                diversity_n=diversity_n,
+                seed=args.seed,
+                distribution=1,
+                protocol_identity=protocol_identity,
+                source_distribution=1,
+            )
+            last_checkpoint = now
+        predicted = max(recent_durations, default=60.0) * 1.25 + 120.0
+        if (
+            _STOP_REQUESTED
+            or now - started + predicted >= args.soft_time_limit_seconds
+            or (args.max_updates is not None and update_in_phase >= args.max_updates)
+        ):
+            _save_resume(
+                stream_root,
+                runner,
+                mode="fixed",
+                algorithm=args.algorithm,
+                diversity_n=diversity_n,
+                seed=args.seed,
+                distribution=1,
+                protocol_identity=protocol_identity,
+                source_distribution=1,
+            )
+            return False
+
+    if evaluate is not None:
+        evaluation = evaluate(
+            runner.learner.params,
+            _eval_key(
+                seed=args.seed,
+                diversity_n2=diversity_n * diversity_n,
+                distribution=1,
+                update=_as_int(runner.update_in_phase),
+                heldout=False,
+            ),
+        )
+        jax.block_until_ready(evaluation)
+        _write_evaluation_metric(
+            metrics_path,
+            evaluation,
+            algorithm=args.algorithm,
+            diversity_n=diversity_n,
+            seed=args.seed,
+            mode="fixed_eval",
+            distribution=1,
+            runner=runner,
+            schedule=schedule,
+            source_distribution=1,
+        )
+    _save_resume(
+        stream_root,
+        runner,
+        mode="fixed",
+        algorithm=args.algorithm,
+        diversity_n=diversity_n,
+        seed=args.seed,
+        distribution=1,
+        protocol_identity=protocol_identity,
+        source_distribution=1,
+    )
+    metadata = _checkpoint_meta(
+        mode="fixed",
+        algorithm=args.algorithm,
+        diversity_n=diversity_n,
+        seed=args.seed,
+        distribution=1,
+        runner=runner,
+        protocol_identity=protocol_identity,
+        source_distribution=1,
+    )
+    atomic_marker(stream_root / "DONE", metadata)
+    return True
 
 
 def _run_adapt(args, config: TD2Config, diversity_n: int, stream_root: Path) -> bool:
@@ -1194,7 +1474,7 @@ def _run_adapt(args, config: TD2Config, diversity_n: int, stream_root: Path) -> 
 
 def _parse_args(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("main", "adapt"), required=True)
+    parser.add_argument("--mode", choices=("main", "fixed", "adapt"), required=True)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--data-root", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
@@ -1205,6 +1485,9 @@ def _parse_args(argv: list[str] | None = None):
     parser.add_argument("--soft-time-limit-seconds", type=float, default=2700.0)
     parser.add_argument("--checkpoint-interval-seconds", type=float, default=600.0)
     parser.add_argument("--max-updates", type=int, default=None, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--stop-after-distribution", type=int, default=None, help=argparse.SUPPRESS
+    )
     return parser.parse_args(argv)
 
 
@@ -1232,6 +1515,11 @@ def main(argv: list[str] | None = None) -> int:
             )
     elif args.stage is not None:
         raise ValueError("--stage is valid only with --mode adapt")
+    if args.stop_after_distribution is not None:
+        if args.mode != "main":
+            raise ValueError("--stop-after-distribution is valid only with --mode main")
+        if not 1 <= args.stop_after_distribution <= config.experiment.num_distributions:
+            raise ValueError("--stop-after-distribution is outside the configured range")
     if args.soft_time_limit_seconds <= 180:
         raise ValueError("soft time limit must leave more than 180 seconds")
 
@@ -1246,11 +1534,12 @@ def main(argv: list[str] | None = None) -> int:
         stage=args.stage,
     )
     stream_root.mkdir(parents=True, exist_ok=True)
-    completed = (
-        _run_main(args, config, diversity_n, stream_root)
-        if args.mode == "main"
-        else _run_adapt(args, config, diversity_n, stream_root)
-    )
+    if args.mode == "main":
+        completed = _run_main(args, config, diversity_n, stream_root)
+    elif args.mode == "fixed":
+        completed = _run_fixed(args, config, diversity_n, stream_root)
+    else:
+        completed = _run_adapt(args, config, diversity_n, stream_root)
     print(
         json.dumps(
             {

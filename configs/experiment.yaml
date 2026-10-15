@@ -29,7 +29,9 @@ experiment:
   ambiguity_resolution: >-
     Use the paper's full ten-distribution sequence and all nine Figure 6
     diversity levels, with PPO plus Continual Backpropagation as the sole
-    production method.
+    production method. Also branch each stream from its immutable checkpoint
+    after the first distribution and keep training on that fixed distribution
+    to the same nominal one-billion-step horizon.
 
   adaptation:
     enabled: true

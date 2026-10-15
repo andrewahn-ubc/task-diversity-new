@@ -231,11 +231,24 @@ def test_create_plots_writes_all_requested_artifacts(tmp_path: Path) -> None:
                         success_rate=success,
                     )
                 )
+        rows.append(
+            _row(
+                method=method,
+                mode="fixed_eval",
+                distribution=1,
+                environment_steps=512,
+                nominal_environment_steps=512,
+                success_rate=0.75,
+            )
+        )
     _write_metrics(tmp_path / "runs" / "metrics.csv", rows)
 
     outputs = create_plots(SMOKE_CONFIG, tmp_path)
-    assert len(outputs) == 7
+    assert len(outputs) == 9
     assert all(path.is_file() and path.stat().st_size > 0 for path in outputs)
+    fixed_plot = tmp_path / "plots" / "fixed_distribution_evaluation_success"
+    assert fixed_plot.with_suffix(".png").is_file()
+    assert fixed_plot.with_suffix(".pdf").is_file()
     summary = outputs[-1].read_text(encoding="utf-8")
     assert "normalized_auc_mean" in summary
     assert "time_to_threshold_steps_mean" in summary

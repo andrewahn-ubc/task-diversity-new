@@ -337,6 +337,8 @@ def _line_plot(
     ylabel: str,
     title: str,
     destination: Path,
+    show_boundaries: bool = True,
+    xlabel: str = "Continual environment steps (millions)",
 ) -> None:
     import matplotlib.pyplot as plt
 
@@ -384,8 +386,9 @@ def _line_plot(
             linewidth=1.8,
             label="_nolegend_",
         )
-    _boundaries(axis, config)
-    axis.set(xlabel="Continual environment steps (millions)", ylabel=ylabel, title=title)
+    if show_boundaries:
+        _boundaries(axis, config)
+    axis.set(xlabel=xlabel, ylabel=ylabel, title=title)
     axis.grid(axis="y", alpha=0.20)
     axis.legend(ncol=min(5, max(1, len(widths))), fontsize=8, frameon=False)
     if ylabel == "Evaluation success rate":
@@ -601,11 +604,12 @@ def _validate_coverage(
         )
         for row in rows
     }
-    stages = (
-        config.experiment.adaptation.after_distributions
-        if mode == "adapt"
-        else tuple(range(1, config.experiment.num_distributions + 1))
-    )
+    if mode == "adapt":
+        stages = config.experiment.adaptation.after_distributions
+    elif mode == "fixed_eval":
+        stages = (1,)
+    else:
+        stages = tuple(range(1, config.experiment.num_distributions + 1))
     expected = {
         (method, width, seed, stage)
         for method in config.experiment.methods
@@ -669,9 +673,23 @@ def create_plots(
     adaptation = [
         row for row in rows if row.mode == "adapt" and math.isfinite(row.success_rate)
     ]
+    shared_cutoff = float(config.ppo.total_timesteps)
+    fixed_continuation = [
+        row
+        for row in rows
+        if row.mode == "fixed_eval"
+        and math.isfinite(row.success_rate)
+        and _global_step(row, config) > shared_cutoff
+    ]
+    fixed_evaluation = [
+        row
+        for row in evaluation
+        if row.distribution == 1 and _global_step(row, config) <= shared_cutoff
+    ] + fixed_continuation
     _validate_coverage(evaluation, config, mode="eval")
     _validate_coverage(training, config, mode="train")
     _validate_coverage(adaptation, config, mode="adapt")
+    _validate_coverage(fixed_continuation, config, mode="fixed_eval")
     _line_plot(
         evaluation,
         config=config,
@@ -688,6 +706,16 @@ def create_plots(
         title="Continual training reward",
         destination=plot_dir / "training_episodic_return",
     )
+    _line_plot(
+        fixed_evaluation,
+        config=config,
+        metric=lambda row: row.success_rate,
+        ylabel="Evaluation success rate",
+        title="Fixed-distribution evaluation (distribution 1)",
+        destination=plot_dir / "fixed_distribution_evaluation_success",
+        show_boundaries=False,
+        xlabel="Fixed-distribution environment steps (millions)",
+    )
     _adaptation_plot(adaptation, plot_dir / "heldout_adaptation")
     summary_path = plot_dir / "adaptation_summary.csv"
     _write_adaptation_summary(adaptation, summary_path, threshold=threshold)
@@ -696,6 +724,8 @@ def create_plots(
         plot_dir / "figure6a_evaluation_success.pdf",
         plot_dir / "training_episodic_return.png",
         plot_dir / "training_episodic_return.pdf",
+        plot_dir / "fixed_distribution_evaluation_success.png",
+        plot_dir / "fixed_distribution_evaluation_success.pdf",
         plot_dir / "heldout_adaptation.png",
         plot_dir / "heldout_adaptation.pdf",
         summary_path,

@@ -14,7 +14,7 @@ export JAX_PLATFORMS=cpu
 export MPLBACKEND=Agg
 
 : "${TD2_OUTPUT_ROOT:?TD2_OUTPUT_ROOT is required}"
-td2_note "all 45 main streams and 450 adaptation branches are complete; plotting"
+td2_note "all 45 continual streams, 45 fixed streams, and 450 adaptation branches are complete; plotting four graphs"
 timeout --signal=TERM --kill-after=240s 2700s \
   "$TD2_VENV_DIR/bin/python" -m td2.plot \
     --config "$REPO_ROOT/configs/experiment.yaml" \

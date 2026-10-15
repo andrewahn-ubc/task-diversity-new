@@ -4,19 +4,21 @@ This repository is a runnable JAX implementation of the requested modified
 Figure 6 continual-learning experiment. It runs recurrent PPO with Continual
 Backpropagation (CBP) across ten sequential Banyan task distributions at all
 nine Figure 6 diversity levels, and launches non-destructive held-out
-adaptation branches from every training-stage checkpoint.
+adaptation branches from every training-stage checkpoint. It also runs a
+matched fixed-distribution control: each stream shares the main run's first
+100M steps, then remains on distribution 1 for the rest of its 1B-step budget.
 
 The cluster workflow is intentionally two commands. It builds a pinned,
 offline-capable CUDA environment, validates it on a real GPU, checkpoints
 inside every one-hour GPU allocation, requeues incomplete array elements, and
-creates the three requested aggregate plots only after every run is complete.
+creates the four requested aggregate plots only after every run is complete.
 
 ## Quick start on Narval
 
 First copy or clone this repository onto a filesystem visible to compute
 nodes, log into Narval as `taegyoem`, and `cd` to the repository root. The
-defaults are configured for account `def-krallen` and a global GPU concurrency
-cap of 100.
+submission defaults split work between accounts `def-krallen` and
+`def-mijungp`, with one global GPU concurrency cap of 100.
 
 ```bash
 bash scripts/setup_compute_canada.sh \
@@ -25,23 +27,27 @@ bash scripts/setup_compute_canada.sh \
 
 bash scripts/submit_all.sh \
   --cluster narval \
-  --account def-krallen \
+  --account-a def-krallen \
+  --account-b def-mijungp \
   --data-root /scratch/taegyoem/td2-data-10dist-9div-cbp-seeded100 \
-  --output-root /scratch/taegyoem/td2-results-10dist-9div-cbp-seeded100 \
+  --output-root /scratch/taegyoem/td2-results-10dist-9div-cbp-seeded100-fixed1b \
   --max-concurrent 100
 ```
 
 These values are also the script defaults, so `bash scripts/submit_all.sh` is
-equivalent after setup. Narval requests one A100 for each GPU job.
+equivalent after setup. That one submission command launches the continual,
+held-out, and fixed-distribution experiments. Narval requests one A100 for
+each GPU job.
 The setup command writes a small runtime locator under `.runtime/`, so the
 second command works even though the large virtual environment is in scratch.
 
 Do not run the setup command on a compute node. It downloads wheels and exact
-source revisions once on the login node; all scheduled jobs then run offline.
-The source packages are installed as non-editable snapshots, inherited
-Python/CUDA paths are sanitized, and the wheelhouse is checksummed before
-reuse, so queued jobs cannot silently pick up later checkout edits or a user
-CUDA library ahead of JAX's pinned CUDA 12 wheels.
+dependency revisions once on the login node; all scheduled jobs then run
+offline. Binary dependencies are installed as non-editable snapshots, while
+the launcher deliberately imports `src/` from the current checkout. Therefore
+a normal `git pull` that changes only this repository's code does not require
+another setup run. Inherited Python/CUDA paths are sanitized and the wheelhouse
+is checksummed before reuse.
 The repository, runtime, data, and result paths must remain available until
 the experiment finishes. Scratch is fast but is not archival storage, so copy
 the final results elsewhere afterward. Do not edit the repository, rerun setup,
@@ -59,10 +65,14 @@ active.
 | Per-stage budget | 100,000,000 nominal environment steps |
 | Actual per-stage budget | 381 updates × 2048 envs × 128 steps = 99,876,864 steps |
 | Main streams | 1 method × 9 diversities × 5 seeds = 45 |
+| Fixed-distribution control | The same 45 streams train only on distribution 1 for 1B nominal steps |
+| Actual fixed budget | 10 × 99,876,864 = 998,768,640 steps per stream |
+| Shared prefix | Each fixed stream reuses its main stream's exact first-100M checkpoint; those steps are computed once |
 | Adaptation probes | 10 checkpoints per main stream = 450 branches |
 | Held-out probe | 100 unseen task-tree/layout pairs per seed, fixed across that seed's stages and diversities |
 | Adaptation budget | another 99,876,864 actual steps per branch (100M nominal) |
-| Total work | 89,889,177,600 actual environment steps, split evenly between main and adaptation runs |
+| Fixed held-out probes | None |
+| Total unique work | 130,339,307,520 actual environment steps, counting the shared prefix only once |
 
 Integer PPO rollouts cannot consume exactly 100M steps. The implementation
 uses PureJaxRL's floor-division convention, records nominal and actual step
@@ -74,6 +84,13 @@ and utility estimates. It resets the environment, GRU carry, and a branch-local
 learning-rate schedule, trains only on its seed's fixed 100-task held-out set,
 and writes to a separate directory. No branch can alter the original continual
 trajectory.
+
+At the first stage boundary, the fixed-distribution offshoot loads the entire
+immutable main runner checkpoint, including the environment and recurrent
+state, RNG, PPO optimizer, CBP statistics, and learning-rate schedule. The main
+stream then moves to distribution 2 while the offshoot continues on
+distribution 1 without a reset or learning-rate restart. The fixed run writes
+under `fixed/` and never launches a held-out branch.
 
 ## PPO and CBP implementation
 
@@ -139,8 +156,9 @@ four trajectory minibatches, horizon 256, actor clip `0.2`, value clip `10`,
 entropy coefficient `0.05`, `gamma=0.99`, `lambda=0.8`, value coefficient
 `0.8`, gradient norm `0.5`, embedding width 512, FC width 1024, and GRU width
 256. Adam state and one continuous 1B-step learning-rate schedule are carried
-across task distributions. A fresh 100M-step schedule is used only inside each
-independent held-out adaptation branch.
+across task distributions. The fixed offshoot inherits that same schedule at
+100M and continues it without a restart. A fresh 100M-step schedule is used
+only inside each independent held-out adaptation branch.
 
 Environment-only values from the private YAML are used where Banyan has the
 same meaning, including the `-0.1` distractor penalty and 0.5 distractor-pair
@@ -193,8 +211,8 @@ artifacts.
 Data preparation is a five-element CPU array, one independently seeded bundle
 per learner seed. Each element requests four hours without a shorter hidden
 watchdog; every completed task-distribution round remains resumable if an
-element is interrupted. Every GPU job still requests one hour. Main and
-adaptation workers use at most 2,700 seconds (45 minutes) of
+element is interrupted. Every GPU job still requests one hour. Main, fixed,
+and adaptation workers use at most 2,700 seconds (45 minutes) of
 useful work, retain 15 minutes for compilation/checkpoint flex, and receive
 `USR1` ten minutes before Slurm's hard deadline. Checkpoints are
 content-addressed, checksummed, fsynced, and
@@ -204,24 +222,35 @@ configuration and immutable data manifest. A successful incomplete job submits
 itself for requeue under the same array task ID. Every completed stage writes an
 immutable checkpoint and `DONE` marker before the held-out phase begins.
 
-The dependency graph is:
+The launcher partitions every production matrix into two disjoint array
+shards, one charged to each configured account. The dependency graph is:
 
 ```text
-5-way CPU data preparation array
+5-way per-seed CPU data preparation
   -> real-GPU package/CUDA/PPO+CBP smoke gate
-    -> 45-way PPO+CBP main array
-       -> 450-way held-out adaptation array
-          -> aggregate plots
+    -> shared first-100M prefix for all 45 streams
+       +--> continual continuation through distributions 2-10 --+
+       +--> fixed continuation on distribution 1 through 1B ----+
+                                                               -> 450-way held-out adaptation
+                                                                  (continual checkpoints only)
+                                                               -> aggregate plots
 ```
 
-Both GPU phases are fixed Slurm arrays. An incomplete task atomically saves its
-checkpoint and requeues the same array element, so continuations remain under
-the original array throttle instead of becoming unbounded standalone jobs.
-The held-out array starts after all 45 continual streams finish; it still loads
-each of the ten immutable stage checkpoints independently, so the scientific
-branching semantics are unchanged. `--max-concurrent 100` therefore caps this
-workflow at 100 simultaneous GPU tasks (the main phase has only 45). Slurm and
-your fair share determine how many actually run.
+The shared prefix is an immutable checkpoint, not a second approximate run.
+The continual and fixed continuations can then run in parallel without
+recomputing their common first 100M steps. Incomplete tasks atomically save and
+requeue the same array element, so continuations remain under their original
+array throttles instead of becoming unbounded standalone jobs. The held-out
+arrays still load each of the ten continual checkpoints independently; no
+held-out jobs are created for `fixed/`.
+
+`--account-a` and `--account-b` default to `def-krallen` and `def-mijungp`.
+The launcher divides the configured `--max-concurrent 100` budget across the
+account-specific shards, so it remains a workflow-wide cap rather than 100 per
+account. The sparse array split assigns 296 initial task identities to each
+account (293 GPU identities each); later requeues remain on the same account.
+Slurm and the fair share of each allocation determine how many tasks actually
+run.
 The one-hour GPU and four-hour CPU requests are scheduling-friendly, but no
 script can guarantee a five-day completion time without measuring throughput
 and queue delay on your allocation. The GPU smoke job fails the whole
@@ -234,11 +263,13 @@ Inspect jobs and logs with:
 
 ```bash
 squeue --me
-tail -f /scratch/taegyoem/td2-results-10dist-9div-cbp-seeded100/slurm-logs/*.out
+tail -f /scratch/taegyoem/td2-results-10dist-9div-cbp-seeded100-fixed1b/slurm-logs/*.out
 ```
 
-Data-preparation logs are named `data-<array-job-id>_<seed-index>.out`; main
-and adaptation logs use the corresponding Slurm array job and task IDs.
+Data-preparation logs are named `data-a-<array-job-id>_<seed-index>.out` and
+`data-b-<array-job-id>_<seed-index>.out`. Prefix, combined main/fixed
+continuation, and adaptation logs similarly start with `prefix-a|b`,
+`continuation-a|b`, and `adapt-a|b`.
 
 Normal continuation is automatic. If jobs are cancelled or fail, wait until
 no `td2-*` jobs are queued or running, then use the same paths with `--resume`:
@@ -246,9 +277,10 @@ no `td2-*` jobs are queued or running, then use the same paths with `--resume`:
 ```bash
 bash scripts/submit_all.sh \
   --cluster narval \
-  --account def-krallen \
+  --account-a def-krallen \
+  --account-b def-mijungp \
   --data-root /scratch/taegyoem/td2-data-10dist-9div-cbp-seeded100 \
-  --output-root /scratch/taegyoem/td2-results-10dist-9div-cbp-seeded100 \
+  --output-root /scratch/taegyoem/td2-results-10dist-9div-cbp-seeded100-fixed1b \
   --max-concurrent 100 \
   --resume
 ```
@@ -262,8 +294,8 @@ protocol; do not pass them to `--resume`.
 
 ## Results
 
-After all 45 main streams and 450 probes have `DONE` markers, the aggregate job
-creates:
+After all 45 main streams, 45 fixed streams, and 450 probes have `DONE`
+markers, the aggregate job creates four graph types:
 
 - `plots/figure6a_evaluation_success.{png,pdf}` — greedy evaluation success,
   with task-distribution boundaries and mean ± SEM over five seeds;
@@ -271,6 +303,10 @@ creates:
   returns in the same continual format;
 - `plots/heldout_adaptation.{png,pdf}` — one panel per source checkpoint,
   showing success during the 100M-step held-out branches;
+- `plots/fixed_distribution_evaluation_success.{png,pdf}` — greedy evaluation
+  success while training on distribution 1 for the full 1B-step budget, with
+  the shared first-100M measurements and no distribution-boundary dotted
+  lines;
 - `plots/adaptation_summary.csv` — initial/final success, normalized AUC,
   time to 0.8 success, and threshold-reached fraction.
 

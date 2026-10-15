@@ -7,6 +7,7 @@ import pytest
 import yaml
 
 from td2.config import ConfigurationError, load_config
+from td2.train import _fixed_axis_steps
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -50,6 +51,7 @@ def test_default_experiment_contract_and_derived_schedule() -> None:
     assert config.experiment.adaptation.after_distributions == tuple(range(1, 11))
     assert config.experiment.adaptation.heldout_tasks == 100
     assert "full ten-distribution sequence" in config.experiment.ambiguity_resolution
+    assert "fixed distribution" in config.experiment.ambiguity_resolution
     assert config.runtime.seeds == (0, 1, 2, 3, 4)
 
     assert config.architecture.shared_pre_gru_fc_layers == 2
@@ -78,6 +80,22 @@ def test_default_experiment_contract_and_derived_schedule() -> None:
     assert adaptation is not None
     assert adaptation.total_optimizer_steps == 3_048
     assert adaptation.warmup_optimizer_steps == 152
+
+
+def test_fixed_branch_uses_the_shared_prefix_and_nominal_one_billion_axis() -> None:
+    config = load_config(EXPERIMENT_CONFIG)
+    schedule = config.derived.training_per_distribution
+
+    assert _fixed_axis_steps(
+        schedule, update_in_phase=schedule.num_updates
+    ) == (99_876_864, 99_876_864)
+    assert _fixed_axis_steps(
+        schedule, update_in_phase=schedule.num_updates + 1
+    ) == (100_262_144, 100_139_008)
+    assert _fixed_axis_steps(
+        schedule,
+        update_in_phase=config.derived.total_training_updates_per_stream,
+    ) == (999_876_864, 998_768_640)
 
 
 def test_config_and_nested_values_are_immutable() -> None:

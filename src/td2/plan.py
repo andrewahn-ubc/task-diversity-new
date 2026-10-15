@@ -23,6 +23,18 @@ class AdaptationWorkItem(MainWorkItem):
     stage: int
 
 
+@dataclass(frozen=True)
+class FixedWorkItem(MainWorkItem):
+    """One fixed-first-distribution stream branching after stage 1."""
+
+
+@dataclass(frozen=True)
+class ContinuationWorkItem(MainWorkItem):
+    """One post-prefix continuation, identified by its branch kind."""
+
+    kind: str
+
+
 def data_seeds(config: TD2Config) -> tuple[int, ...]:
     """Return the learner seeds that each require an immutable data bundle."""
 
@@ -35,6 +47,32 @@ def main_work_items(config: TD2Config) -> tuple[MainWorkItem, ...]:
         for algorithm in config.experiment.methods
         for diversity_n2 in config.experiment.diversity_levels
         for seed in config.runtime.seeds
+    )
+
+
+def fixed_work_items(config: TD2Config) -> tuple[FixedWorkItem, ...]:
+    """Return fixed-distribution streams in the same order as main streams."""
+
+    return tuple(
+        FixedWorkItem(item.algorithm, item.diversity_n2, item.seed)
+        for item in main_work_items(config)
+    )
+
+
+def continuation_work_items(config: TD2Config) -> tuple[ContinuationWorkItem, ...]:
+    """Return all main continuations followed by all fixed continuations."""
+
+    mains = main_work_items(config)
+    fixed = fixed_work_items(config)
+    return tuple(
+        ContinuationWorkItem(
+            item.algorithm,
+            item.diversity_n2,
+            item.seed,
+            kind,
+        )
+        for kind, items in (("main", mains), ("fixed", fixed))
+        for item in items
     )
 
 
@@ -76,11 +114,14 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("counts")
     subparsers.add_parser("data-count")
+    subparsers.add_parser("continuation-count")
     subparsers.add_parser("identity")
     seed = subparsers.add_parser("data-seed")
     seed.add_argument("--index", required=True, type=int)
     main = subparsers.add_parser("main")
     main.add_argument("--index", required=True, type=int)
+    continuation = subparsers.add_parser("continuation")
+    continuation.add_argument("--index", required=True, type=int)
     adapt = subparsers.add_parser("adapt")
     adapt.add_argument("--index", required=True, type=int)
     return parser
@@ -90,11 +131,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     config = load_config(args.config)
     mains = main_work_items(config)
+    continuations = continuation_work_items(config)
     adaptations = adaptation_work_items(config)
     if args.command == "counts":
         print(f"{len(mains)}\t{len(adaptations)}")
     elif args.command == "data-count":
         print(len(data_seeds(config)))
+    elif args.command == "continuation-count":
+        print(len(continuations))
     elif args.command == "identity":
         print(plan_identity(config))
     elif args.command == "data-seed":
@@ -103,6 +147,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         item = _indexed(mains, args.index, "main")
         assert isinstance(item, MainWorkItem)
         print(f"{item.algorithm}\t{item.diversity_n2}\t{item.seed}")
+    elif args.command == "continuation":
+        item = _indexed(continuations, args.index, "continuation")
+        assert isinstance(item, ContinuationWorkItem)
+        print(
+            f"{item.kind}\t{item.algorithm}\t"
+            f"{item.diversity_n2}\t{item.seed}"
+        )
     else:
         item = _indexed(adaptations, args.index, "adaptation")
         assert isinstance(item, AdaptationWorkItem)

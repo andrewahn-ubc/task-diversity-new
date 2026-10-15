@@ -81,6 +81,10 @@ td2_activate_runtime() {
   source "$TD2_VENV_DIR/bin/activate"
 
   export PYTHONNOUSERSITE=1
+  # Execute the checked-out experiment code while retaining the pinned binary
+  # dependencies in the durable venv. A normal git pull therefore does not
+  # require rebuilding the runtime when requirements have not changed.
+  export PYTHONPATH="$TD2_REPO_ROOT/src"
   export PIP_NO_INDEX=1
   export PIP_DISABLE_PIP_VERSION_CHECK=1
   export WANDB_MODE=offline
@@ -114,6 +118,12 @@ td2_build_gpu_sbatch_args() {
 td2_stream_dir() {
   local output_root=$1 algorithm=$2 diversity=$3 seed=$4
   printf '%s/%s/diversity_%s/seed_%s\n' "$output_root" "$algorithm" "$diversity" "$seed"
+}
+
+td2_fixed_dir() {
+  local output_root=$1 algorithm=$2 diversity=$3 seed=$4
+  printf '%s/fixed/%s/diversity_%s/seed_%s\n' \
+    "$output_root" "$algorithm" "$diversity" "$seed"
 }
 
 td2_adapt_dir() {
