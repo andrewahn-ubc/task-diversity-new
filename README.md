@@ -157,21 +157,22 @@ generator at commit `7bb5d385cb2b48f49ab01d0c9a47b9d404e2ecc3`. Lower
 diversities are nested prefixes of the `n=256` task and layout banks. Layout
 masks and depth-six topologies are disjoint across rounds, and producer
 signatures do not repeat across rounds. The ten training rounds use Banyan's
-public CLI at `n=256`, with a 200,000-attempt retry budget and a cap of 10 new
-unary producer signatures per training round, reserving at least 20 of the 120
-possible unary signatures for the disjoint held-out round.
+same pinned per-round sampler at `n=256`, with its default 20,000-attempt retry
+budget and a cap of 10 new unary producer signatures per training round,
+reserving at least 20 of the 120 possible unary signatures for the disjoint
+held-out round. Completed raw rounds are atomically staged and reused after an
+interruption instead of restarting at round one.
 The fixed held-out set uses the same pinned sampler at logical `n=20`, after
 reconstructing all training blocker sets, and is padded only to the common
 on-disk stride. This avoids sampling an unused eleventh `n=256` round. Because
 the held-out call uses a private function, its exact API name, commit, seed
 derivation, logical/storage widths, and hashes are recorded in the manifest.
 
-The paper states that leaves come from a 40-object pool sampled from an
-8-shape × 10-color vocabulary; the manifest records an explicit seeded
-40-of-80 selection. One upstream difference remains: the released generator's
-deterministic producer mapping can emit intermediate or root objects from
-Banyan's full 10-shape × 12-color domain. In the audited deterministic bundle,
-38.13% of producer-rule occurrences fall outside the 80-object vocabulary.
+The paper states that each distribution's leaves come from a 40-object pool
+sampled from an 8-shape × 10-color vocabulary; the manifest records each
+round's deterministic 40-of-80 selection. One upstream difference remains: the
+released generator's deterministic producer mapping can emit intermediate or
+root objects from Banyan's full 10-shape × 12-color domain.
 Reproducing an 80-object-closed mapping would require changing the released
 codec and fixed combination table, so this implementation keeps the pinned
 behavior and makes the deviation explicit.
@@ -182,9 +183,10 @@ artifacts.
 
 ## Scheduler design
 
-The CPU data-preparation job requests four hours and uses at most 10,800 seconds
-(three hours), retaining one hour of flex. Every GPU job still requests one
-hour. Main and adaptation workers use at most 2,700 seconds (45 minutes) of
+The CPU data-preparation job requests four hours without a shorter hidden
+watchdog; every completed task-distribution round remains resumable if the job
+is interrupted. Every GPU job still requests one hour. Main and adaptation
+workers use at most 2,700 seconds (45 minutes) of
 useful work, retain 15 minutes for compilation/checkpoint flex, and receive
 `USR1` ten minutes before Slurm's hard deadline. Checkpoints are
 content-addressed, checksummed, fsynced, and

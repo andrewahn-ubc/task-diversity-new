@@ -12,7 +12,6 @@ import td2.prepare_data as prepare_data_module
 from td2.prepare_data import (
     BANYAN_COLOR_STRIDE,
     DataPreparationError,
-    GENERATOR_MODULE,
     HELDOUT_GENERATOR_API,
     MAX_NEW_UNARY_SIGNATURES_PER_TRAIN_ROUND,
     MAX_TOPOLOGY_ATTEMPTS,
@@ -20,11 +19,11 @@ from td2.prepare_data import (
     PAPER_NUM_COLORS,
     PAPER_NUM_ITEMS,
     SCHEMA_VERSION,
+    _generate_training_rounds,
     _generation_spec,
     _heldout_round_seed,
     _load_packed,
     _normalize_and_validate_rounds,
-    _ruleset_generator_command,
     _validate_logical_round,
     _verify_existing,
     _write_json,
@@ -37,6 +36,7 @@ from td2.prepare_data import (
 def test_paper_leaf_pool_is_seeded_unique_and_inside_8_by_10_vocabulary() -> None:
     selected = paper_leaf_pool_uids(0)
     assert selected == paper_leaf_pool_uids(0)
+    assert selected != paper_leaf_pool_uids(0, round_index=1)
     assert len(selected) == 40
     assert len(set(selected)) == 40
     valid = {
@@ -112,9 +112,7 @@ def test_reserved_empty_output_directory_is_allowed(tmp_path: Path) -> None:
     assert _verify_existing(output, {"schema_version": 1}) is None
 
 
-def test_production_generation_spec_and_training_command_reserve_heldout_capacity(
-    tmp_path: Path,
-) -> None:
+def test_production_generation_spec_reserves_heldout_capacity() -> None:
     config = SimpleNamespace(
         experiment=SimpleNamespace(
             diversity_levels=(1, 4, 16, 64, 256, 1024, 4096, 16384, 65536),
@@ -125,26 +123,21 @@ def test_production_generation_spec_and_training_command_reserve_heldout_capacit
         runtime=SimpleNamespace(seed=0),
     )
     spec = _generation_spec(config)
-    command = _ruleset_generator_command(tmp_path, spec)
 
-    def argument_after(flag: str) -> str:
-        return command[command.index(flag) + 1]
-
-    assert SCHEMA_VERSION == 3
+    assert SCHEMA_VERSION == 4
     assert spec["num_train_distributions"] == 10
     assert spec["num_rounds"] == 11
     assert spec["max_n"] == 256
     assert spec["diversity_widths"] == [1, 2, 4, 8, 16, 32, 64, 128, 256]
     assert spec["heldout_n_per_depth"] == 20
     assert spec["ruleset_generation"]["heldout_interface"] == HELDOUT_GENERATOR_API
-    assert argument_after("-m") == GENERATOR_MODULE
-    assert argument_after("--n") == "256"
-    assert argument_after("--rounds") == "10"
-    assert argument_after("--max-topology-attempts") == str(
+    assert spec["ruleset_generation"]["training_interface"] == HELDOUT_GENERATOR_API
+    assert spec["ruleset_generation"]["resumable_round_staging"] is True
+    assert len(spec["leaf_pool_uids_by_round"]) == 11
+    assert all(len(pool) == 40 for pool in spec["leaf_pool_uids_by_round"])
+    assert len({tuple(pool) for pool in spec["leaf_pool_uids_by_round"]}) == 11
+    assert spec["ruleset_generation"]["max_topology_attempts"] == (
         MAX_TOPOLOGY_ATTEMPTS
-    )
-    assert argument_after("--max-new-unary-signatures-per-round") == str(
-        MAX_NEW_UNARY_SIGNATURES_PER_TRAIN_ROUND
     )
     assert MAX_NEW_UNARY_SIGNATURES_PER_TRAIN_ROUND == 10
     assert _heldout_round_seed(master_seed=0, max_n=256, round_index=10) == 1_263_838_259
@@ -160,6 +153,56 @@ def _round_metadata(round_index: int, logical_n: int, prefix: str) -> dict:
         "round_unique_depth6_topology_count": len(topologies),
         "round_unique_producer_signature_count": 0,
     }
+
+
+def test_training_round_generation_resumes_from_completed_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec = {
+        "max_n": 2,
+        "num_train_distributions": 2,
+        "num_depths": 6,
+        "master_seed": 0,
+        "ruleset_base_seed": 0,
+        "leaf_pool_uids_by_round": [[1, 2], [3, 4], [5, 6]],
+    }
+    calls: list[tuple[int, int]] = []
+    fail_second_round = True
+
+    def fake_generate(**kwargs):
+        nonlocal fail_second_round
+        round_index = int(kwargs["round_index"])
+        calls.append((round_index, int(kwargs["rounds_remaining"])))
+        if round_index == 1 and fail_second_round:
+            raise RuntimeError("interrupted")
+        packed = np.full((12, 1), PACKED_PAD, dtype=np.uint32)
+        metadata = _round_metadata(round_index, 2, f"round-{round_index}")
+        metadata.update(
+            {
+                "pool_uids": [int(value) for value in kwargs["base_pool"]],
+                "base_seed": int(kwargs["base_seed"]),
+                "max_depth": int(kwargs["max_depth"]),
+            }
+        )
+        topologies = set(metadata["round_depth6_topology_signatures"])
+        return packed, metadata, topologies, set()
+
+    monkeypatch.setattr(
+        prepare_data_module,
+        "_load_round_generator",
+        lambda: SimpleNamespace(_generate_round_dataset=fake_generate),
+    )
+    monkeypatch.setattr(prepare_data_module, "_producer_signatures", lambda _: set())
+
+    with pytest.raises(DataPreparationError, match="training round 1"):
+        _generate_training_rounds(tmp_path, spec)
+    assert calls == [(0, 2), (1, 1)]
+
+    fail_second_round = False
+    files = _generate_training_rounds(tmp_path, spec)
+    assert calls == [(0, 2), (1, 1), (1, 1)]
+    assert len(files) == 2
+    assert all(data.is_file() and metadata.is_file() for data, metadata in files)
 
 
 def test_mixed_size_rounds_are_padded_depth_by_depth_to_the_max_n_stride(

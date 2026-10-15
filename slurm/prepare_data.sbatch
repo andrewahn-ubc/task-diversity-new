@@ -4,7 +4,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
-#SBATCH --signal=B:USR1@600
+#SBATCH --requeue
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -19,8 +19,7 @@ export PYTHONUNBUFFERED=1
 
 : "${TD2_DATA_ROOT:?TD2_DATA_ROOT is required}"
 td2_note "preparing immutable task, layout, distractor, and heldout manifests"
-timeout --signal=TERM --kill-after=240s 10800s \
-  "$TD2_VENV_DIR/bin/python" -m td2.prepare_data \
-    --config "$REPO_ROOT/configs/experiment.yaml" \
-    --output "$TD2_DATA_ROOT"
+"$TD2_VENV_DIR/bin/python" -m td2.prepare_data \
+  --config "$REPO_ROOT/configs/experiment.yaml" \
+  --output "$TD2_DATA_ROOT"
 td2_note "data preparation finished"
