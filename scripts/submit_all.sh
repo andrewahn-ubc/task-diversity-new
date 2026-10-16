@@ -13,6 +13,7 @@ ACCOUNT_B=def-mijungp
 OUTPUT_ROOT=/scratch/taegyoem/td2-results-10dist-9div-cbp-seeded100-fixed1b
 DATA_ROOT=''
 MAX_CONCURRENT=100
+EXCLUDE_NODES=''
 RESUME=false
 
 usage() {
@@ -31,6 +32,8 @@ Options:
                        (default: /scratch/taegyoem/td2-results-10dist-9div-cbp-seeded100-fixed1b)
   --data-root PATH     Prepared data (default: value saved by setup)
   --max-concurrent N   Combined GPU concurrency cap (default: 100; 2-100)
+  --exclude-nodes LIST Comma-separated Slurm nodes to avoid for every job
+                       in this submission (default: none)
   --resume             Resume checkpoints in an existing output root. Refuses
                        to run while any td2-* jobs are still queued or running.
   -h, --help           Show this help
@@ -69,6 +72,11 @@ while (($#)); do
       MAX_CONCURRENT=$2
       shift 2
       ;;
+    --exclude-nodes)
+      (($# >= 2)) || td2_die "--exclude-nodes requires a value"
+      EXCLUDE_NODES=$2
+      shift 2
+      ;;
     --resume)
       RESUME=true
       shift
@@ -89,8 +97,16 @@ done
 td2_require_uint max-concurrent "$MAX_CONCURRENT"
 ((MAX_CONCURRENT >= 2 && MAX_CONCURRENT <= 100)) || td2_die \
   "--max-concurrent must be between 2 and 100"
+if [[ -n $EXCLUDE_NODES ]]; then
+  [[ $EXCLUDE_NODES =~ ^[A-Za-z0-9._,-]+$ ]] || td2_die \
+    "invalid --exclude-nodes list: $EXCLUDE_NODES"
+fi
 ACCOUNT_A_CAP=$(( (MAX_CONCURRENT + 1) / 2 ))
 ACCOUNT_B_CAP=$(( MAX_CONCURRENT / 2 ))
+TD2_EXCLUDE_SBATCH_ARGS=()
+if [[ -n $EXCLUDE_NODES ]]; then
+  TD2_EXCLUDE_SBATCH_ARGS=("--exclude=$EXCLUDE_NODES")
+fi
 
 td2_require_command sbatch
 td2_require_command scontrol
@@ -188,6 +204,7 @@ td2_build_gpu_sbatch_args
 
 td2_note "submitting deterministic data bundles across $ACCOUNT_A and $ACCOUNT_B"
 DATA_A_SUBMISSION=$(sbatch --parsable \
+  "${TD2_EXCLUDE_SBATCH_ARGS[@]}" \
   --account="$ACCOUNT_A" \
   --chdir="$REPO_ROOT" \
   --job-name=td2-data-a \
@@ -197,6 +214,7 @@ DATA_A_SUBMISSION=$(sbatch --parsable \
   "$REPO_ROOT/slurm/prepare_data.sbatch")
 DATA_A_JOB=$(td2_parse_job_id "$DATA_A_SUBMISSION")
 DATA_B_SUBMISSION=$(sbatch --parsable \
+  "${TD2_EXCLUDE_SBATCH_ARGS[@]}" \
   --account="$ACCOUNT_B" \
   --chdir="$REPO_ROOT" \
   --job-name=td2-data-b \
@@ -208,6 +226,7 @@ DATA_B_JOB=$(td2_parse_job_id "$DATA_B_SUBMISSION")
 
 td2_note "submitting GPU smoke gate after data arrays $DATA_A_JOB and $DATA_B_JOB"
 SMOKE_SUBMISSION=$(sbatch --parsable \
+  "${TD2_EXCLUDE_SBATCH_ARGS[@]}" \
   --account="$ACCOUNT_B" \
   --chdir="$REPO_ROOT" \
   --job-name=td2-smoke \
@@ -221,6 +240,7 @@ SMOKE_JOB=$(td2_parse_job_id "$SMOKE_SUBMISSION")
 
 td2_note "submitting 45 shared 100M prefixes after smoke job $SMOKE_JOB"
 PREFIX_A_SUBMISSION=$(sbatch --parsable \
+  "${TD2_EXCLUDE_SBATCH_ARGS[@]}" \
   --account="$ACCOUNT_A" \
   --chdir="$REPO_ROOT" \
   --job-name=td2-prefix-a \
@@ -233,6 +253,7 @@ PREFIX_A_SUBMISSION=$(sbatch --parsable \
   "$REPO_ROOT/slurm/prefix.sbatch")
 PREFIX_A_JOB=$(td2_parse_job_id "$PREFIX_A_SUBMISSION")
 PREFIX_B_SUBMISSION=$(sbatch --parsable \
+  "${TD2_EXCLUDE_SBATCH_ARGS[@]}" \
   --account="$ACCOUNT_B" \
   --chdir="$REPO_ROOT" \
   --job-name=td2-prefix-b \
@@ -247,6 +268,7 @@ PREFIX_B_JOB=$(td2_parse_job_id "$PREFIX_B_SUBMISSION")
 
 td2_note "submitting 45 continual and 45 fixed-distribution continuations"
 CONT_A_SUBMISSION=$(sbatch --parsable \
+  "${TD2_EXCLUDE_SBATCH_ARGS[@]}" \
   --account="$ACCOUNT_A" \
   --chdir="$REPO_ROOT" \
   --job-name=td2-cont-a \
@@ -259,6 +281,7 @@ CONT_A_SUBMISSION=$(sbatch --parsable \
   "$REPO_ROOT/slurm/continuation.sbatch")
 CONT_A_JOB=$(td2_parse_job_id "$CONT_A_SUBMISSION")
 CONT_B_SUBMISSION=$(sbatch --parsable \
+  "${TD2_EXCLUDE_SBATCH_ARGS[@]}" \
   --account="$ACCOUNT_B" \
   --chdir="$REPO_ROOT" \
   --job-name=td2-cont-b \
@@ -273,6 +296,7 @@ CONT_B_JOB=$(td2_parse_job_id "$CONT_B_SUBMISSION")
 
 td2_note "submitting 450 held-out branches after both continuation arrays"
 ADAPT_A_SUBMISSION=$(sbatch --parsable \
+  "${TD2_EXCLUDE_SBATCH_ARGS[@]}" \
   --account="$ACCOUNT_A" \
   --chdir="$REPO_ROOT" \
   --job-name=td2-adapt-a \
@@ -285,6 +309,7 @@ ADAPT_A_SUBMISSION=$(sbatch --parsable \
   "$REPO_ROOT/slurm/adapt.sbatch")
 ADAPT_A_JOB=$(td2_parse_job_id "$ADAPT_A_SUBMISSION")
 ADAPT_B_SUBMISSION=$(sbatch --parsable \
+  "${TD2_EXCLUDE_SBATCH_ARGS[@]}" \
   --account="$ACCOUNT_B" \
   --chdir="$REPO_ROOT" \
   --job-name=td2-adapt-b \
@@ -299,6 +324,7 @@ ADAPT_B_JOB=$(td2_parse_job_id "$ADAPT_B_SUBMISSION")
 
 td2_note "submitting four-graph aggregation after adaptation arrays"
 AGGREGATE_SUBMISSION=$(sbatch --parsable \
+  "${TD2_EXCLUDE_SBATCH_ARGS[@]}" \
   --account="$ACCOUNT_B" \
   --chdir="$REPO_ROOT" \
   --job-name=td2-plot \
@@ -326,6 +352,7 @@ td2_write_receipt "$RECEIPT" \
   "account_b=$ACCOUNT_B" \
   "account_a_cap=$ACCOUNT_A_CAP" \
   "account_b_cap=$ACCOUNT_B_CAP" \
+  "exclude_nodes=${EXCLUDE_NODES:-none}" \
   "plan_identity=$PLAN_IDENTITY" \
   "max_concurrent=$MAX_CONCURRENT" \
   "data_a_job=$DATA_A_JOB" \
