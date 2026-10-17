@@ -156,6 +156,30 @@ td2_run_checkpointable() {
   done
 }
 
+td2_accept_watchdog_exit() {
+  local status=$1
+  local resume_root=$2
+  local batch_started_epoch=$3
+  local soft_limit=$4
+  if ((status == 0)); then
+    return 0
+  fi
+  case $status in
+    124|137|138) ;;
+    *) td2_die "training process failed with exit status $status" ;;
+  esac
+
+  local elapsed_seconds=$(( $(date +%s) - batch_started_epoch ))
+  ((elapsed_seconds + 5 >= soft_limit)) || td2_die \
+    "training process exited with status $status before the watchdog deadline"
+  if [[ ! -f $resume_root/latest.json && ! -f $resume_root/previous.json ]]; then
+    td2_die \
+      "watchdog stopped training with status $status but no durable checkpoint exists at $resume_root"
+  fi
+  td2_note \
+    "watchdog stopped a long accelerator operation with status $status; requeuing from the durable checkpoint"
+}
+
 td2_write_receipt() {
   local destination=$1
   shift

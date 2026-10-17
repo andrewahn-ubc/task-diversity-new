@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 #SBATCH --time=01:00:00
-#SBATCH --signal=B:USR1@600
 #SBATCH --requeue
 #SBATCH --open-mode=append
 
@@ -57,8 +56,9 @@ WATCHDOG_SECONDS=$((SOFT_LIMIT - ELAPSED_SECONDS))
 ((WATCHDOG_SECONDS > 180)) || td2_die \
   "less than 181 seconds remain in the batch work budget before training"
 
+TRAIN_STATUS=0
 td2_run_checkpointable \
-  timeout --preserve-status --signal=USR1 --kill-after=240s "${WATCHDOG_SECONDS}s" \
+  timeout --preserve-status --signal=USR1 --kill-after=720s "${WATCHDOG_SECONDS}s" \
   "$TD2_VENV_DIR/bin/python" -m td2.train \
     --mode adapt \
     --config "$REPO_ROOT/configs/experiment.yaml" \
@@ -68,7 +68,9 @@ td2_run_checkpointable \
     --diversity "$TD2_DIVERSITY" \
     --seed "$TD2_SEED" \
     --stage "$TD2_STAGE" \
-    --soft-time-limit-seconds "$WATCHDOG_SECONDS"
+    --soft-time-limit-seconds "$WATCHDOG_SECONDS" || TRAIN_STATUS=$?
+td2_accept_watchdog_exit \
+  "$TRAIN_STATUS" "$ADAPT_DIR/resume" "$BATCH_STARTED_EPOCH" "$SOFT_LIMIT"
 
 if [[ -f $ADAPT_DIR/DONE ]]; then
   td2_note "adaptation branch is complete"
