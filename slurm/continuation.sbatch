@@ -70,7 +70,7 @@ td2_run_checkpointable \
     --seed "$SEED" \
     --soft-time-limit-seconds "$WATCHDOG_SECONDS" || TRAIN_STATUS=$?
 td2_accept_watchdog_exit \
-  "$TRAIN_STATUS" "$STREAM_DIR/resume" "$BATCH_STARTED_EPOCH" "$SOFT_LIMIT"
+  "$TRAIN_STATUS" "$BATCH_STARTED_EPOCH" "$SOFT_LIMIT"
 
 if [[ -f $STREAM_DIR/DONE ]]; then
   td2_note "$KIND continuation is complete"

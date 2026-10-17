@@ -70,7 +70,7 @@ td2_run_checkpointable \
     --stage "$TD2_STAGE" \
     --soft-time-limit-seconds "$WATCHDOG_SECONDS" || TRAIN_STATUS=$?
 td2_accept_watchdog_exit \
-  "$TRAIN_STATUS" "$ADAPT_DIR/resume" "$BATCH_STARTED_EPOCH" "$SOFT_LIMIT"
+  "$TRAIN_STATUS" "$BATCH_STARTED_EPOCH" "$SOFT_LIMIT"
 
 if [[ -f $ADAPT_DIR/DONE ]]; then
   td2_note "adaptation branch is complete"
