@@ -11,7 +11,7 @@ CLUSTER=narval
 ACCOUNT_A=def-krallen
 ACCOUNT_B=def-mijungp
 OUTPUT_ROOT=/scratch/taegyoem/td2-results-10dist-9div-cbp-seeded100-fixed2b-fresh
-DATA_ROOT=/scratch/taegyoem/td2-data-10dist-9div-cbp-seeded100
+DATA_ROOT=''
 MAX_CONCURRENT=100
 EXCLUDE_NODES=ng31004,ng31104
 RESUME=false
@@ -31,6 +31,7 @@ Options:
   --account-b ACCOUNT        Second allocation (default: def-mijungp)
   --output-root PATH         New clean 2B output
   --data-root PATH           Existing seed-specific task bundles
+                             (default: value saved by setup)
   --max-concurrent N         Combined GPU concurrency cap (default: 100; 2-100)
   --exclude-nodes LIST       Comma-separated Slurm nodes to avoid
                              (default: ng31004,ng31104)
@@ -116,6 +117,7 @@ td2_load_runtime "$REPO_ROOT"
 td2_load_profile "$REPO_ROOT" "$CLUSTER"
 # Use the current checkout with the existing pinned binary dependencies.
 export PYTHONPATH="$REPO_ROOT/src"
+DATA_ROOT=${DATA_ROOT:-$TD2_DATA_ROOT}
 
 PLAN_COUNTS=$("$TD2_VENV_DIR/bin/python" -m td2.plan \
   --config "$REPO_ROOT/configs/experiment.yaml" counts)
@@ -153,7 +155,7 @@ if [[ $OUTPUT_ROOT == "$DATA_ROOT" \
   td2_die "--output-root and --data-root must be distinct and not nested"
 fi
 
-td2_note "validating the $DATA_ARRAY_SIZE existing seed-specific task bundles"
+td2_note "validating the $DATA_ARRAY_SIZE existing seed-specific task bundles at $DATA_ROOT"
 for ((INDEX = 0; INDEX < DATA_ARRAY_SIZE; INDEX++)); do
   SEED=$("$TD2_VENV_DIR/bin/python" -m td2.plan \
     --config "$REPO_ROOT/configs/experiment.yaml" data-seed --index "$INDEX")
