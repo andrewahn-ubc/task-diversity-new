@@ -608,7 +608,7 @@ def _validate_coverage(
     }
     if mode == "adapt":
         stages = config.experiment.adaptation.after_distributions
-    elif mode in {"fixed_eval", "fixed_2b_eval"}:
+    elif mode in {"fixed_eval", "fixed_2b_eval", "fixed_2b_fresh_eval"}:
         stages = (1,)
     else:
         stages = tuple(range(1, config.experiment.num_distributions + 1))
@@ -736,6 +736,60 @@ def create_fixed_2b_plot(
     return [destination.with_suffix(".png"), destination.with_suffix(".pdf")]
 
 
+def create_fixed_2b_fresh_plot(
+    config_path: str | Path,
+    output_root: str | Path,
+    *,
+    threshold: float = DEFAULT_THRESHOLD,
+) -> list[Path]:
+    """Plot a clean fixed-distribution 2B run trained from initialization."""
+
+    if not 0.0 <= threshold <= 1.0:
+        raise ValueError("threshold must be in [0, 1]")
+    config = load_config(config_path)
+    rows = [
+        row
+        for row in read_metric_rows(output_root)
+        if row.mode == "fixed_2b_fresh_eval" and math.isfinite(row.success_rate)
+    ]
+    _validate_coverage(rows, config, mode="fixed_2b_fresh_eval")
+    target = 2 * config.derived.total_training_updates_per_stream
+    terminal_updates: dict[tuple[str, int, int], int] = {}
+    for row in rows:
+        key = (row.method, row.diversity_n, row.seed)
+        terminal_updates[key] = max(terminal_updates.get(key, -1), row.global_update)
+    wrong = sorted(
+        (*key, update)
+        for key, update in terminal_updates.items()
+        if update != target
+    )
+    if wrong:
+        preview = ", ".join(
+            f"{method}/n={width}/seed={seed}: {update}"
+            for method, width, seed, update in wrong[:8]
+        )
+        suffix = " ..." if len(wrong) > 8 else ""
+        raise PlotDataError(
+            "fixed_2b_fresh_eval metrics have incorrect terminal global_update "
+            f"(expected {target}): {preview}{suffix}"
+        )
+
+    plot_dir = Path(output_root).expanduser().resolve() / "plots"
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    destination = plot_dir / "fixed_distribution_evaluation_success_2b_fresh"
+    _line_plot(
+        rows,
+        config=config,
+        metric=lambda row: row.success_rate,
+        ylabel="Evaluation success rate",
+        title="Fixed-distribution evaluation through 2B steps (clean schedule)",
+        destination=destination,
+        show_boundaries=False,
+        xlabel="Fixed-distribution environment steps (millions)",
+    )
+    return [destination.with_suffix(".png"), destination.with_suffix(".pdf")]
+
+
 def create_plots(
     config_path: str | Path,
     output_root: str | Path,
@@ -831,6 +885,11 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="write only the combined fixed-distribution 0-to-2B plot",
     )
+    parser.add_argument(
+        "--fixed-2b-fresh-only",
+        action="store_true",
+        help="write only the clean fixed-distribution 2B plot",
+    )
     parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
     return parser
 
@@ -839,12 +898,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     if not 0.0 <= args.threshold <= 1.0:
         raise SystemExit("--threshold must be in [0, 1]")
+    if args.fixed_2b_only and args.fixed_2b_fresh_only:
+        raise SystemExit("choose only one fixed-2B plotting mode")
     if args.fixed_2b_only:
         if args.source_output_root is None:
             raise SystemExit("--fixed-2b-only requires --source-output-root")
         outputs = create_fixed_2b_plot(
             args.config,
             args.source_output_root,
+            args.output_root,
+            threshold=args.threshold,
+        )
+    elif args.fixed_2b_fresh_only:
+        if args.source_output_root is not None:
+            raise SystemExit(
+                "--source-output-root is not used with --fixed-2b-fresh-only"
+            )
+        outputs = create_fixed_2b_fresh_plot(
+            args.config,
             args.output_root,
             threshold=args.threshold,
         )

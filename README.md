@@ -41,37 +41,35 @@ each GPU job.
 The setup command writes a small runtime locator under `.runtime/`, so the
 second command works even though the large virtual environment is in scratch.
 
-### Extend the completed fixed run from 1B to 2B
+### Run the clean fixed-distribution 2B experiment
 
-After the original workflow has finished, pull this version of the repository
-and launch the additional 1B steps with one command:
+To rerun the fixed-distribution control from initialization with a proper 2B
+learning-rate schedule, use one command:
 
 ```bash
 bash scripts/submit_fixed_2b.sh
 ```
 
-The launcher uses the paths and accounts shown above by default. It verifies
-all 45 completed 1B fixed-stream checkpoints, reads them without modifying
-them, and submits exactly 45 continuation streams split between `def-krallen`
-and `def-mijungp`. It also excludes `ng31004` and `ng31104` by default because
-those nodes caused the earlier Lustre failures. The added work is written to
-`/scratch/taegyoem/td2-results-10dist-9div-cbp-seeded100-fixed2b-extension`.
+The launcher reuses the five existing seed-specific task bundles, but it does
+not load any prior model checkpoint. It submits exactly 45 fresh streams (nine
+diversity levels by five seeds) split between `def-krallen` and `def-mijungp`.
+It also excludes `ng31004` and `ng31104` by default because those nodes caused
+the earlier Lustre failures. Results are written to
+`/scratch/taegyoem/td2-results-10dist-9div-cbp-seeded100-fixed2b-fresh`.
 If that submission is interrupted, wait until no `td2-*` jobs remain and run
 `bash scripts/submit_fixed_2b.sh --resume`.
 
-The continuation restores the complete runner state: model, Adam, CBP, GRU,
-environment, RNG, and all update counters. The completed 1B cosine schedule is
-already at zero learning rate, so useful checkpoint continuation cannot be
-identical to a from-scratch 2B run. The extension therefore keeps the saved
-schedule counter and changes its cumulative horizon from 30,480 to 60,960
-optimizer steps (with the 2B warmup boundary at 3,048); this produces an
-unavoidable learning-rate jump at 1B and then decays to zero at 2B. That policy
-is embedded in every continuation checkpoint and named in the plot title.
+Each stream starts at optimizer step zero with the same deterministic seed and
+distribution-1 task bank as before. Its schedule warms from zero to `3e-4`
+over 3,048 optimizer steps (5% of the 2B horizon), then cosine-decays smoothly
+to zero at optimizer step 60,960. There is no learning-rate discontinuity at
+1B. The run consumes 7,620 PPO updates, or 1,997,537,280 actual environment
+steps per stream (1,999,876,864 on the nominal plotting axis).
 
 When all streams finish, the new root contains
-`plots/fixed_distribution_evaluation_success_2b.{png,pdf}`, combining the
-original 0-1B measurements with the 1B-2B continuation. No held-out branches
-are launched and none of the completed four original plots are overwritten.
+`plots/fixed_distribution_evaluation_success_2b_fresh.{png,pdf}`. No held-out
+branches, data-generation jobs, or original continual experiments are
+launched, and none of the completed results are overwritten.
 
 Do not run the setup command on a compute node. It downloads wheels and exact
 dependency revisions once on the login node; all scheduled jobs then run
@@ -339,6 +337,9 @@ markers, the aggregate job creates four graph types:
   success while training on distribution 1 for the full 1B-step budget, with
   the shared first-100M measurements and no distribution-boundary dotted
   lines;
+- the separate clean 2B workflow writes
+  `plots/fixed_distribution_evaluation_success_2b_fresh.{png,pdf}` in its own
+  result root;
 - `plots/adaptation_summary.csv` — initial/final success, normalized AUC,
   time to 0.8 success, and threshold-reached fraction.
 

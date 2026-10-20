@@ -15,6 +15,7 @@ from td2.plot import (
     _first_crossing,
     _seed_adaptation_summaries,
     _validate_coverage,
+    create_fixed_2b_fresh_plot,
     create_fixed_2b_plot,
     create_plots,
     read_metric_rows,
@@ -367,3 +368,56 @@ def test_fixed_2b_plot_rejects_missing_or_incomplete_extension_streams(
     )
     with pytest.raises(PlotDataError, match="terminal global_update"):
         create_fixed_2b_plot(SMOKE_CONFIG, source_root, incomplete_root)
+
+
+def _write_fixed_2b_fresh_fixture(
+    output_root: Path, *, terminal_update: int = 32
+) -> None:
+    for method in ("ppo", "ppo_cbp"):
+        _write_metrics(
+            output_root
+            / "fixed_2b_fresh"
+            / method
+            / "diversity_1"
+            / "seed_0"
+            / "metrics.csv",
+            [
+                _row(
+                    method=method,
+                    mode="fixed_2b_fresh_eval",
+                    distribution=1,
+                    environment_steps=0,
+                    nominal_environment_steps=0,
+                    success_rate=0.1,
+                    global_update=0,
+                ),
+                _row(
+                    method=method,
+                    mode="fixed_2b_fresh_eval",
+                    distribution=1,
+                    environment_steps=1024,
+                    nominal_environment_steps=1024,
+                    success_rate=0.9,
+                    global_update=terminal_update,
+                ),
+            ],
+        )
+
+
+def test_create_fixed_2b_fresh_plot_requires_complete_terminal_streams(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("matplotlib")
+    complete = tmp_path / "complete"
+    _write_fixed_2b_fresh_fixture(complete)
+
+    outputs = create_fixed_2b_fresh_plot(SMOKE_CONFIG, complete)
+
+    assert len(outputs) == 2
+    assert all(path.is_file() and path.stat().st_size > 0 for path in outputs)
+    assert all("2b_fresh" in path.name for path in outputs)
+
+    incomplete = tmp_path / "incomplete"
+    _write_fixed_2b_fresh_fixture(incomplete, terminal_update=31)
+    with pytest.raises(PlotDataError, match="terminal global_update"):
+        create_fixed_2b_fresh_plot(SMOKE_CONFIG, incomplete)

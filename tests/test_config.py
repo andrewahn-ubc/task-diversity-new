@@ -3,10 +3,13 @@ from __future__ import annotations
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 
+import jax.numpy as jnp
+import numpy as np
 import pytest
 import yaml
 
 from td2.config import ConfigurationError, load_config
+from td2.ppo import scheduled_learning_rate
 from td2.train import _fixed_2b_schedule, _fixed_axis_steps
 
 
@@ -106,6 +109,31 @@ def test_fixed_branch_uses_the_shared_prefix_and_nominal_one_billion_axis() -> N
     assert _fixed_axis_steps(
         schedule, update_in_phase=target_updates
     ) == (1_999_876_864, 1_997_537_280)
+
+    lr_kwargs = {
+        "base_learning_rate": config.ppo.learning_rate,
+        "total_optimizer_steps": target_optimizer_steps,
+        "warmup_optimizer_steps": warmup_optimizer_steps,
+        "anneal": config.ppo.anneal_learning_rate,
+    }
+    assert float(scheduled_learning_rate(jnp.asarray(0), **lr_kwargs)) == 0.0
+    assert np.isclose(
+        float(
+            scheduled_learning_rate(
+                jnp.asarray(warmup_optimizer_steps), **lr_kwargs
+            )
+        ),
+        config.ppo.learning_rate,
+    )
+    before_1b = float(
+        scheduled_learning_rate(jnp.asarray(30_479), **lr_kwargs)
+    )
+    at_1b = float(scheduled_learning_rate(jnp.asarray(30_480), **lr_kwargs))
+    assert abs(at_1b - before_1b) < 1e-7
+    assert 0.0 < at_1b < config.ppo.learning_rate
+    assert float(
+        scheduled_learning_rate(jnp.asarray(target_optimizer_steps), **lr_kwargs)
+    ) == 0.0
 
 
 def test_config_and_nested_values_are_immutable() -> None:

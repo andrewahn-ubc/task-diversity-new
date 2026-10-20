@@ -13,28 +13,24 @@ td2_activate_runtime
 export JAX_PLATFORMS=cpu
 export MPLBACKEND=Agg
 
-: "${TD2_SOURCE_OUTPUT_ROOT:?TD2_SOURCE_OUTPUT_ROOT is required}"
 : "${TD2_OUTPUT_ROOT:?TD2_OUTPUT_ROOT is required}"
 : "${SLURM_JOB_ID:?SLURM_JOB_ID is required}"
 
-AGGREGATE_DIR="$TD2_OUTPUT_ROOT/.orchestration/fixed-2b-aggregate"
+AGGREGATE_DIR="$TD2_OUTPUT_ROOT/.orchestration/fixed-2b-fresh-aggregate"
 if [[ -f $AGGREGATE_DIR/DONE ]]; then
-  td2_note "combined 0-2B fixed-distribution plot was already complete"
+  td2_note "clean fixed-distribution 2B plot was already complete"
   exit 0
 fi
 
-td2_note "all 45 fixed 2B extensions are complete; plotting the combined 0-2B result"
+td2_note "all 45 clean fixed 2B streams are complete; plotting the result"
 timeout --signal=TERM --kill-after=240s 2700s \
   "$TD2_VENV_DIR/bin/python" -m td2.plot \
     --config "$REPO_ROOT/configs/experiment.yaml" \
     --output-root "$TD2_OUTPUT_ROOT" \
-    --fixed-2b-only \
-    --source-output-root "$TD2_SOURCE_OUTPUT_ROOT"
+    --fixed-2b-fresh-only
 
 mkdir -p -- "$AGGREGATE_DIR"
-{
-  printf 'completed_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  printf 'source_output_root=%s\n' "$TD2_SOURCE_OUTPUT_ROOT"
-} >"$AGGREGATE_DIR/DONE.tmp.$SLURM_JOB_ID"
+printf 'completed_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  >"$AGGREGATE_DIR/DONE.tmp.$SLURM_JOB_ID"
 mv -f -- "$AGGREGATE_DIR/DONE.tmp.$SLURM_JOB_ID" "$AGGREGATE_DIR/DONE"
-td2_note "combined 0-2B fixed-distribution plot complete"
+td2_note "clean fixed-distribution 2B plot complete"

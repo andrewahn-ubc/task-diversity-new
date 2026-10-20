@@ -17,7 +17,6 @@ td2_install_signal_forwarders
 td2_require_command timeout
 td2_require_command scontrol
 
-: "${TD2_SOURCE_OUTPUT_ROOT:?TD2_SOURCE_OUTPUT_ROOT is required}"
 : "${TD2_OUTPUT_ROOT:?TD2_OUTPUT_ROOT is required}"
 : "${TD2_DATA_ROOT:?TD2_DATA_ROOT is required}"
 : "${TD2_ACCOUNT:?TD2_ACCOUNT is required}"
@@ -33,12 +32,11 @@ IFS=$'\t' read -r ALGORITHM DIVERSITY SEED <<<"$PLAN_ITEM"
   "could not decode fixed-2B stream index $STREAM_INDEX"
 
 SEED_DATA_ROOT="$TD2_DATA_ROOT/seed_$SEED"
-SOURCE_STREAM=$(td2_fixed_dir \
-  "$TD2_SOURCE_OUTPUT_ROOT" "$ALGORITHM" "$DIVERSITY" "$SEED")
-STREAM_DIR=$(td2_fixed_2b_dir \
+STREAM_DIR=$(td2_fixed_2b_fresh_dir \
   "$TD2_OUTPUT_ROOT" "$ALGORITHM" "$DIVERSITY" "$SEED")
-[[ -f $SOURCE_STREAM/DONE && -f $SOURCE_STREAM/resume/latest.json ]] || td2_die \
-  "completed 1B source checkpoint is unavailable: $SOURCE_STREAM"
+[[ -f $SEED_DATA_ROOT/manifest.json \
+   && -f $SEED_DATA_ROOT/manifest.sha256 ]] || td2_die \
+  "prepared task bundle is unavailable: $SEED_DATA_ROOT"
 
 SOFT_LIMIT=${TD2_SOFT_LIMIT_SECONDS:-2700}
 td2_require_uint soft-time-limit-seconds "$SOFT_LIMIT"
@@ -46,10 +44,10 @@ td2_require_uint soft-time-limit-seconds "$SOFT_LIMIT"
   "soft time limit must be between 300 and 2700 seconds"
 
 mkdir -p -- "$STREAM_DIR"
-td2_note "fixed 1B-to-2B extension: algorithm=$ALGORITHM diversity=$DIVERSITY seed=$SEED index=$STREAM_INDEX"
+td2_note "clean fixed 2B run: algorithm=$ALGORITHM diversity=$DIVERSITY seed=$SEED index=$STREAM_INDEX"
 
 if [[ -f $STREAM_DIR/DONE ]]; then
-  td2_note "fixed 2B extension was already complete"
+  td2_note "clean fixed 2B run was already complete"
   exit 0
 fi
 
@@ -62,10 +60,9 @@ TRAIN_STATUS=0
 td2_run_checkpointable \
   timeout --preserve-status --signal=USR1 --kill-after=720s "${WATCHDOG_SECONDS}s" \
   "$TD2_VENV_DIR/bin/python" -m td2.train \
-    --mode fixed_2b \
+    --mode fixed_2b_fresh \
     --config "$REPO_ROOT/configs/experiment.yaml" \
     --data-root "$SEED_DATA_ROOT" \
-    --source-output-root "$TD2_SOURCE_OUTPUT_ROOT" \
     --output-root "$TD2_OUTPUT_ROOT" \
     --algorithm "$ALGORITHM" \
     --diversity "$DIVERSITY" \
@@ -75,14 +72,14 @@ td2_accept_watchdog_exit \
   "$TRAIN_STATUS" "$BATCH_STARTED_EPOCH" "$SOFT_LIMIT"
 
 if [[ -f $STREAM_DIR/DONE ]]; then
-  td2_note "fixed 2B extension is complete"
+  td2_note "clean fixed 2B run is complete"
   exit 0
 fi
 
 RESTART_COUNT=${SLURM_RESTART_COUNT:-0}
 td2_require_uint restart-count "$RESTART_COUNT"
 ((RESTART_COUNT < 3000)) || td2_die "requeue limit exceeded for $STREAM_DIR"
-td2_note "fixed 2B checkpoint is durable; requeuing array task (restart $((RESTART_COUNT + 1)))"
+td2_note "clean fixed 2B checkpoint is durable; requeuing array task (restart $((RESTART_COUNT + 1)))"
 REQUEUE_TARGET=${SLURM_JOB_ID}
 if [[ -n ${SLURM_ARRAY_JOB_ID:-} && -n ${SLURM_ARRAY_TASK_ID:-} ]]; then
   REQUEUE_TARGET="${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}"
