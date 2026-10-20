@@ -15,6 +15,7 @@ from td2.plot import (
     _first_crossing,
     _seed_adaptation_summaries,
     _validate_coverage,
+    create_fixed_2b_plot,
     create_plots,
     read_metric_rows,
 )
@@ -35,6 +36,7 @@ FIELDS = [
     "adaptation_steps",
     "source_distribution",
     "nominal_environment_steps",
+    "global_update",
 ]
 
 
@@ -61,6 +63,7 @@ def _row(**overrides: object) -> dict[str, object]:
         "adaptation_steps": "",
         "source_distribution": "",
         "nominal_environment_steps": 0,
+        "global_update": 0,
     }
     base.update(overrides)
     return base
@@ -252,3 +255,115 @@ def test_create_plots_writes_all_requested_artifacts(tmp_path: Path) -> None:
     summary = outputs[-1].read_text(encoding="utf-8")
     assert "normalized_auc_mean" in summary
     assert "time_to_threshold_steps_mean" in summary
+
+
+def _write_fixed_2b_fixture(
+    source_root: Path,
+    extension_root: Path,
+    *,
+    ppo_cbp_terminal_update: int = 32,
+    include_ppo_cbp: bool = True,
+) -> None:
+    source_rows: list[dict[str, object]] = []
+    for method in ("ppo", "ppo_cbp"):
+        source_rows.extend(
+            [
+                _row(
+                    method=method,
+                    mode="eval",
+                    distribution=1,
+                    nominal_environment_steps=0,
+                    success_rate=0.1,
+                ),
+                _row(
+                    method=method,
+                    mode="eval",
+                    distribution=1,
+                    environment_steps=256,
+                    nominal_environment_steps=256,
+                    success_rate=0.4,
+                    global_update=8,
+                ),
+                _row(
+                    method=method,
+                    mode="fixed_eval",
+                    distribution=1,
+                    environment_steps=512,
+                    nominal_environment_steps=512,
+                    success_rate=0.7,
+                    global_update=16,
+                ),
+            ]
+        )
+    _write_metrics(source_root / "runs" / "metrics.csv", source_rows)
+
+    for method in ("ppo", "ppo_cbp"):
+        if method == "ppo_cbp" and not include_ppo_cbp:
+            continue
+        terminal_update = ppo_cbp_terminal_update if method == "ppo_cbp" else 32
+        _write_metrics(
+            extension_root
+            / "fixed_2b"
+            / method
+            / "diversity_1"
+            / "seed_0"
+            / "metrics.csv",
+            [
+                _row(
+                    method=method,
+                    mode="fixed_2b_eval",
+                    distribution=1,
+                    environment_steps=768,
+                    nominal_environment_steps=768,
+                    success_rate=0.8,
+                    global_update=24,
+                ),
+                _row(
+                    method=method,
+                    mode="fixed_2b_eval",
+                    distribution=1,
+                    environment_steps=1024,
+                    nominal_environment_steps=1024,
+                    success_rate=0.9,
+                    global_update=terminal_update,
+                ),
+            ],
+        )
+
+
+def test_create_fixed_2b_plot_merges_roots_without_rewriting_old_plots(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("matplotlib")
+    source_root = tmp_path / "source"
+    extension_root = tmp_path / "extension"
+    _write_fixed_2b_fixture(source_root, extension_root)
+    old_plot = source_root / "plots" / "fixed_distribution_evaluation_success.png"
+    old_plot.parent.mkdir(parents=True)
+    old_plot.write_bytes(b"original-1b-plot")
+
+    outputs = create_fixed_2b_plot(SMOKE_CONFIG, source_root, extension_root)
+
+    assert len(outputs) == 2
+    assert all(path.is_file() and path.stat().st_size > 0 for path in outputs)
+    assert old_plot.read_bytes() == b"original-1b-plot"
+    assert not (
+        extension_root / "plots" / "fixed_distribution_evaluation_success.png"
+    ).exists()
+
+
+def test_fixed_2b_plot_rejects_missing_or_incomplete_extension_streams(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    missing_root = tmp_path / "missing"
+    _write_fixed_2b_fixture(source_root, missing_root, include_ppo_cbp=False)
+    with pytest.raises(PlotDataError, match="missing streams"):
+        create_fixed_2b_plot(SMOKE_CONFIG, source_root, missing_root)
+
+    incomplete_root = tmp_path / "incomplete"
+    _write_fixed_2b_fixture(
+        source_root, incomplete_root, ppo_cbp_terminal_update=31
+    )
+    with pytest.raises(PlotDataError, match="terminal global_update"):
+        create_fixed_2b_plot(SMOKE_CONFIG, source_root, incomplete_root)

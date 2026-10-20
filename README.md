@@ -41,6 +41,38 @@ each GPU job.
 The setup command writes a small runtime locator under `.runtime/`, so the
 second command works even though the large virtual environment is in scratch.
 
+### Extend the completed fixed run from 1B to 2B
+
+After the original workflow has finished, pull this version of the repository
+and launch the additional 1B steps with one command:
+
+```bash
+bash scripts/submit_fixed_2b.sh
+```
+
+The launcher uses the paths and accounts shown above by default. It verifies
+all 45 completed 1B fixed-stream checkpoints, reads them without modifying
+them, and submits exactly 45 continuation streams split between `def-krallen`
+and `def-mijungp`. It also excludes `ng31004` and `ng31104` by default because
+those nodes caused the earlier Lustre failures. The added work is written to
+`/scratch/taegyoem/td2-results-10dist-9div-cbp-seeded100-fixed2b-extension`.
+If that submission is interrupted, wait until no `td2-*` jobs remain and run
+`bash scripts/submit_fixed_2b.sh --resume`.
+
+The continuation restores the complete runner state: model, Adam, CBP, GRU,
+environment, RNG, and all update counters. The completed 1B cosine schedule is
+already at zero learning rate, so useful checkpoint continuation cannot be
+identical to a from-scratch 2B run. The extension therefore keeps the saved
+schedule counter and changes its cumulative horizon from 30,480 to 60,960
+optimizer steps (with the 2B warmup boundary at 3,048); this produces an
+unavoidable learning-rate jump at 1B and then decays to zero at 2B. That policy
+is embedded in every continuation checkpoint and named in the plot title.
+
+When all streams finish, the new root contains
+`plots/fixed_distribution_evaluation_success_2b.{png,pdf}`, combining the
+original 0-1B measurements with the 1B-2B continuation. No held-out branches
+are launched and none of the completed four original plots are overwritten.
+
 Do not run the setup command on a compute node. It downloads wheels and exact
 dependency revisions once on the login node; all scheduled jobs then run
 offline. Binary dependencies are installed as non-editable snapshots, while

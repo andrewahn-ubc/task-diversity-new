@@ -7,7 +7,7 @@ import pytest
 import yaml
 
 from td2.config import ConfigurationError, load_config
-from td2.train import _fixed_axis_steps
+from td2.train import _fixed_2b_schedule, _fixed_axis_steps
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -96,6 +96,16 @@ def test_fixed_branch_uses_the_shared_prefix_and_nominal_one_billion_axis() -> N
         schedule,
         update_in_phase=config.derived.total_training_updates_per_stream,
     ) == (999_876_864, 998_768_640)
+
+    target_updates, target_optimizer_steps, warmup_optimizer_steps = (
+        _fixed_2b_schedule(config)
+    )
+    assert target_updates == 7_620
+    assert target_optimizer_steps == 60_960
+    assert warmup_optimizer_steps == 3_048
+    assert _fixed_axis_steps(
+        schedule, update_in_phase=target_updates
+    ) == (1_999_876_864, 1_997_537_280)
 
 
 def test_config_and_nested_values_are_immutable() -> None:

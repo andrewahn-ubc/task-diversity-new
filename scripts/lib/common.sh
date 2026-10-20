@@ -126,6 +126,12 @@ td2_fixed_dir() {
     "$output_root" "$algorithm" "$diversity" "$seed"
 }
 
+td2_fixed_2b_dir() {
+  local output_root=$1 algorithm=$2 diversity=$3 seed=$4
+  printf '%s/fixed_2b/%s/diversity_%s/seed_%s\n' \
+    "$output_root" "$algorithm" "$diversity" "$seed"
+}
+
 td2_adapt_dir() {
   local output_root=$1 algorithm=$2 diversity=$3 seed=$4 stage=$5
   printf '%s/adapt/%s/diversity_%s/seed_%s/stage_%02d\n' \

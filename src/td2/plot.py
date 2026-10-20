@@ -43,6 +43,7 @@ class MetricRow:
     episodic_return: float
     adaptation_steps: float
     source_distribution: int
+    global_update: int
     source: str
     ordinal: int
 
@@ -138,6 +139,7 @@ def read_metric_rows(output_root: str | Path) -> list[MetricRow]:
                         episodic_return=_number(raw.get("episodic_return")),
                         adaptation_steps=_number(raw.get("adaptation_steps")),
                         source_distribution=source_distribution,
+                        global_update=_integer(raw.get("global_update")),
                         source=path.relative_to(root).as_posix(),
                         ordinal=ordinal,
                     )
@@ -606,7 +608,7 @@ def _validate_coverage(
     }
     if mode == "adapt":
         stages = config.experiment.adaptation.after_distributions
-    elif mode == "fixed_eval":
+    elif mode in {"fixed_eval", "fixed_2b_eval"}:
         stages = (1,)
     else:
         stages = tuple(range(1, config.experiment.num_distributions + 1))
@@ -649,6 +651,89 @@ def _validate_coverage(
             f"{mode} metrics contain {len(unexpected)} unexpected streams: "
             f"{preview}{suffix}"
         )
+
+
+def _validate_fixed_2b_terminal_updates(
+    rows: Sequence[MetricRow], config: TD2Config
+) -> None:
+    """Require every fixed-2B stream to end at its exact planned update."""
+
+    _validate_coverage(rows, config, mode="fixed_2b_eval")
+    target = 2 * config.derived.total_training_updates_per_stream
+    terminal_updates: dict[tuple[str, int, int], int] = {}
+    for row in rows:
+        key = (row.method, row.diversity_n, row.seed)
+        terminal_updates[key] = max(terminal_updates.get(key, -1), row.global_update)
+
+    wrong = sorted(
+        (*key, update)
+        for key, update in terminal_updates.items()
+        if update != target
+    )
+    if wrong:
+        preview = ", ".join(
+            f"{method}/n={width}/seed={seed}: {update}"
+            for method, width, seed, update in wrong[:8]
+        )
+        suffix = " ..." if len(wrong) > 8 else ""
+        raise PlotDataError(
+            "fixed_2b_eval metrics have incorrect terminal global_update "
+            f"(expected {target}): {preview}{suffix}"
+        )
+
+
+def create_fixed_2b_plot(
+    config_path: str | Path,
+    source_root: str | Path,
+    extension_root: str | Path,
+    *,
+    threshold: float = DEFAULT_THRESHOLD,
+) -> list[Path]:
+    """Plot the original fixed 1B trajectory plus its 1B-to-2B extension."""
+
+    if not 0.0 <= threshold <= 1.0:
+        raise ValueError("threshold must be in [0, 1]")
+    config = load_config(config_path)
+    source_rows = read_metric_rows(source_root)
+    extension_rows = read_metric_rows(extension_root)
+
+    source_evaluation = [
+        row
+        for row in source_rows
+        if row.mode == "eval"
+        and row.distribution == 1
+        and math.isfinite(row.success_rate)
+    ]
+    source_fixed = [
+        row
+        for row in source_rows
+        if row.mode == "fixed_eval" and math.isfinite(row.success_rate)
+    ]
+    extension_fixed = [
+        row
+        for row in extension_rows
+        if row.mode == "fixed_2b_eval" and math.isfinite(row.success_rate)
+    ]
+    _validate_coverage(source_fixed, config, mode="fixed_eval")
+    _validate_fixed_2b_terminal_updates(extension_fixed, config)
+
+    plot_dir = Path(extension_root).expanduser().resolve() / "plots"
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    destination = plot_dir / "fixed_distribution_evaluation_success_2b"
+    _line_plot(
+        [*source_evaluation, *source_fixed, *extension_fixed],
+        config=config,
+        metric=lambda row: row.success_rate,
+        ylabel="Evaluation success rate",
+        title=(
+            "Fixed-distribution evaluation through 2B steps "
+            "(LR horizon extended at 1B)"
+        ),
+        destination=destination,
+        show_boundaries=False,
+        xlabel="Fixed-distribution environment steps (millions)",
+    )
+    return [destination.with_suffix(".png"), destination.with_suffix(".pdf")]
 
 
 def create_plots(
@@ -736,6 +821,16 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--output-root", required=True, type=Path)
+    parser.add_argument(
+        "--source-output-root",
+        type=Path,
+        help="completed 1B result root (required with --fixed-2b-only)",
+    )
+    parser.add_argument(
+        "--fixed-2b-only",
+        action="store_true",
+        help="write only the combined fixed-distribution 0-to-2B plot",
+    )
     parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
     return parser
 
@@ -744,7 +839,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     if not 0.0 <= args.threshold <= 1.0:
         raise SystemExit("--threshold must be in [0, 1]")
-    outputs = create_plots(args.config, args.output_root, threshold=args.threshold)
+    if args.fixed_2b_only:
+        if args.source_output_root is None:
+            raise SystemExit("--fixed-2b-only requires --source-output-root")
+        outputs = create_fixed_2b_plot(
+            args.config,
+            args.source_output_root,
+            args.output_root,
+            threshold=args.threshold,
+        )
+    else:
+        if args.source_output_root is not None:
+            raise SystemExit("--source-output-root requires --fixed-2b-only")
+        outputs = create_plots(args.config, args.output_root, threshold=args.threshold)
     for output in outputs:
         print(output)
     return 0
