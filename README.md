@@ -71,6 +71,26 @@ When all streams finish, the new root contains
 branches, data-generation jobs, or original continual experiments are
 launched, and none of the completed results are overwritten.
 
+### Run the GRU-512 clean fixed-distribution 2B experiment
+
+To run the same clean 2B experiment with only the recurrent width changed from
+256 to 512, use:
+
+```bash
+bash scripts/submit_fixed_2b_gru512.sh
+```
+
+The existing seed-specific task bundles are reused. The wider GRU, its
+pre-GRU projection, recurrent carry, CBP state, and actor/critic inputs are
+created from initialization; no GRU-256 checkpoint is loaded. Results are
+kept separately under
+`/scratch/taegyoem/td2-results-10dist-9div-cbp-seeded100-fixed2b-fresh-gru512`.
+Resume an interrupted submission only after its earlier jobs have stopped:
+
+```bash
+bash scripts/submit_fixed_2b_gru512.sh --resume
+```
+
 Do not run the setup command on a compute node. It downloads wheels and exact
 dependency revisions once on the login node; all scheduled jobs then run
 offline. Binary dependencies are installed as non-editable snapshots, while

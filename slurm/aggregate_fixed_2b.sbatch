@@ -15,6 +15,9 @@ export MPLBACKEND=Agg
 
 : "${TD2_OUTPUT_ROOT:?TD2_OUTPUT_ROOT is required}"
 : "${SLURM_JOB_ID:?SLURM_JOB_ID is required}"
+TD2_CONFIG_PATH=${TD2_CONFIG_PATH:-$REPO_ROOT/configs/experiment.yaml}
+[[ -f $TD2_CONFIG_PATH ]] || td2_die \
+  "experiment configuration is unavailable: $TD2_CONFIG_PATH"
 
 AGGREGATE_DIR="$TD2_OUTPUT_ROOT/.orchestration/fixed-2b-fresh-aggregate"
 if [[ -f $AGGREGATE_DIR/DONE ]]; then
@@ -25,7 +28,7 @@ fi
 td2_note "all 45 clean fixed 2B streams are complete; plotting the result"
 timeout --signal=TERM --kill-after=240s 2700s \
   "$TD2_VENV_DIR/bin/python" -m td2.plot \
-    --config "$REPO_ROOT/configs/experiment.yaml" \
+    --config "$TD2_CONFIG_PATH" \
     --output-root "$TD2_OUTPUT_ROOT" \
     --fixed-2b-fresh-only
 

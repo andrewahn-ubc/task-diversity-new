@@ -12,6 +12,7 @@ ACCOUNT_A=def-krallen
 ACCOUNT_B=def-mijungp
 OUTPUT_ROOT=/scratch/taegyoem/td2-results-10dist-9div-cbp-seeded100-fixed2b-fresh
 DATA_ROOT=''
+CONFIG_PATH="$REPO_ROOT/configs/experiment.yaml"
 MAX_CONCURRENT=100
 EXCLUDE_NODES=ng31004,ng31104
 RESUME=false
@@ -32,6 +33,8 @@ Options:
   --output-root PATH         New clean 2B output
   --data-root PATH           Existing seed-specific task bundles
                              (default: value saved by setup)
+  --config PATH              Experiment configuration
+                             (default: configs/experiment.yaml)
   --max-concurrent N         Combined GPU concurrency cap (default: 100; 2-100)
   --exclude-nodes LIST       Comma-separated Slurm nodes to avoid
                              (default: ng31004,ng31104)
@@ -66,6 +69,11 @@ while (($#)); do
     --data-root)
       (($# >= 2)) || td2_die "--data-root requires a path"
       DATA_ROOT=$2
+      shift 2
+      ;;
+    --config)
+      (($# >= 2)) || td2_die "--config requires a path"
+      CONFIG_PATH=$2
       shift 2
       ;;
     --max-concurrent)
@@ -118,13 +126,15 @@ td2_load_profile "$REPO_ROOT" "$CLUSTER"
 # Use the current checkout with the existing pinned binary dependencies.
 export PYTHONPATH="$REPO_ROOT/src"
 DATA_ROOT=${DATA_ROOT:-$TD2_DATA_ROOT}
+[[ -f $CONFIG_PATH ]] || td2_die "experiment configuration does not exist: $CONFIG_PATH"
+CONFIG_PATH=$(cd -- "$(dirname -- "$CONFIG_PATH")" && pwd -P)/$(basename -- "$CONFIG_PATH")
 
 PLAN_COUNTS=$("$TD2_VENV_DIR/bin/python" -m td2.plan \
-  --config "$REPO_ROOT/configs/experiment.yaml" counts)
+  --config "$CONFIG_PATH" counts)
 DATA_ARRAY_SIZE=$("$TD2_VENV_DIR/bin/python" -m td2.plan \
-  --config "$REPO_ROOT/configs/experiment.yaml" data-count)
+  --config "$CONFIG_PATH" data-count)
 PLAN_IDENTITY=$("$TD2_VENV_DIR/bin/python" -m td2.plan \
-  --config "$REPO_ROOT/configs/experiment.yaml" identity)
+  --config "$CONFIG_PATH" identity)
 [[ $PLAN_IDENTITY =~ ^[0-9a-f]{64}$ ]] || td2_die \
   "invalid production plan identity: $PLAN_IDENTITY"
 IFS=$'\t' read -r STREAM_ARRAY_SIZE ADAPT_ARRAY_SIZE <<<"$PLAN_COUNTS"
@@ -146,7 +156,7 @@ DATA_ROOT=$(cd -- "$DATA_ROOT" && pwd -P)
 mkdir -p -- "$OUTPUT_ROOT"
 OUTPUT_ROOT=$(cd -- "$OUTPUT_ROOT" && pwd -P)
 
-case "$OUTPUT_ROOT$DATA_ROOT$TD2_RUNTIME_ENV$REPO_ROOT" in
+case "$OUTPUT_ROOT$DATA_ROOT$TD2_RUNTIME_ENV$REPO_ROOT$CONFIG_PATH" in
   *$'\n'*|*,*|*%*) td2_die "Slurm-exported paths may not contain newlines, commas, or percent signs" ;;
 esac
 if [[ $OUTPUT_ROOT == "$DATA_ROOT" \
@@ -158,7 +168,7 @@ fi
 td2_note "validating the $DATA_ARRAY_SIZE existing seed-specific task bundles at $DATA_ROOT"
 for ((INDEX = 0; INDEX < DATA_ARRAY_SIZE; INDEX++)); do
   SEED=$("$TD2_VENV_DIR/bin/python" -m td2.plan \
-    --config "$REPO_ROOT/configs/experiment.yaml" data-seed --index "$INDEX")
+    --config "$CONFIG_PATH" data-seed --index "$INDEX")
   BUNDLE="$DATA_ROOT/seed_$SEED"
   [[ -f $BUNDLE/manifest.json && -f $BUNDLE/manifest.sha256 ]] || td2_die \
     "prepared task bundle is incomplete: $BUNDLE"
@@ -212,12 +222,13 @@ else
     "cluster=$CLUSTER" \
     "account_a=$ACCOUNT_A" \
     "account_b=$ACCOUNT_B" \
+    "config_path=$CONFIG_PATH" \
     "data_root=$DATA_ROOT" \
     "plan_identity=$PLAN_IDENTITY" \
     "max_concurrent=$MAX_CONCURRENT"
 fi
 
-BASE_EXPORTS="ALL,TD2_RUNTIME_ENV=$TD2_RUNTIME_ENV,TD2_PROFILE=$CLUSTER,TD2_OUTPUT_ROOT=$OUTPUT_ROOT,TD2_DATA_ROOT=$DATA_ROOT,TD2_SOFT_LIMIT_SECONDS=2700"
+BASE_EXPORTS="ALL,TD2_RUNTIME_ENV=$TD2_RUNTIME_ENV,TD2_PROFILE=$CLUSTER,TD2_OUTPUT_ROOT=$OUTPUT_ROOT,TD2_DATA_ROOT=$DATA_ROOT,TD2_CONFIG_PATH=$CONFIG_PATH,TD2_SOFT_LIMIT_SECONDS=2700"
 EXPORTS_A="$BASE_EXPORTS,TD2_ACCOUNT=$ACCOUNT_A"
 EXPORTS_B="$BASE_EXPORTS,TD2_ACCOUNT=$ACCOUNT_B"
 td2_build_gpu_sbatch_args
@@ -278,6 +289,7 @@ td2_write_receipt "$RECEIPT" \
   "account_a_cap=$ACCOUNT_A_CAP" \
   "account_b_cap=$ACCOUNT_B_CAP" \
   "exclude_nodes=${EXCLUDE_NODES:-none}" \
+  "config_path=$CONFIG_PATH" \
   "data_root=$DATA_ROOT" \
   "plan_identity=$PLAN_IDENTITY" \
   "max_concurrent=$MAX_CONCURRENT" \

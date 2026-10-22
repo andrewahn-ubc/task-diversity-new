@@ -1,0 +1,6 @@
+extends: experiment.yaml
+
+# Capacity ablation: keep the complete clean-2B protocol unchanged and widen
+# only the recurrent representation. The pre-GRU projection follows this
+# dimension automatically.
+GRU_HIDDEN_DIM: 512

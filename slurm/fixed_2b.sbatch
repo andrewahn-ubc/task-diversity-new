@@ -21,11 +21,14 @@ td2_require_command scontrol
 : "${TD2_DATA_ROOT:?TD2_DATA_ROOT is required}"
 : "${TD2_ACCOUNT:?TD2_ACCOUNT is required}"
 : "${SLURM_JOB_ID:?SLURM_JOB_ID is required}"
+TD2_CONFIG_PATH=${TD2_CONFIG_PATH:-$REPO_ROOT/configs/experiment.yaml}
+[[ -f $TD2_CONFIG_PATH ]] || td2_die \
+  "experiment configuration is unavailable: $TD2_CONFIG_PATH"
 
 STREAM_INDEX=${TD2_STREAM_INDEX:-${SLURM_ARRAY_TASK_ID:?array index is unavailable}}
 td2_require_uint stream-index "$STREAM_INDEX"
 PLAN_ITEM=$("$TD2_VENV_DIR/bin/python" -m td2.plan \
-  --config "$REPO_ROOT/configs/experiment.yaml" main \
+  --config "$TD2_CONFIG_PATH" main \
   --index "$STREAM_INDEX")
 IFS=$'\t' read -r ALGORITHM DIVERSITY SEED <<<"$PLAN_ITEM"
 [[ -n $ALGORITHM && -n $DIVERSITY && -n $SEED ]] || td2_die \
@@ -61,7 +64,7 @@ td2_run_checkpointable \
   timeout --preserve-status --signal=USR1 --kill-after=720s "${WATCHDOG_SECONDS}s" \
   "$TD2_VENV_DIR/bin/python" -m td2.train \
     --mode fixed_2b_fresh \
-    --config "$REPO_ROOT/configs/experiment.yaml" \
+    --config "$TD2_CONFIG_PATH" \
     --data-root "$SEED_DATA_ROOT" \
     --output-root "$TD2_OUTPUT_ROOT" \
     --algorithm "$ALGORITHM" \

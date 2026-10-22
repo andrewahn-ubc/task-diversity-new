@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 
 import jax.numpy as jnp
@@ -15,6 +15,7 @@ from td2.train import _fixed_2b_schedule, _fixed_axis_steps
 
 ROOT = Path(__file__).resolve().parents[1]
 EXPERIMENT_CONFIG = ROOT / "configs" / "experiment.yaml"
+GRU512_CONFIG = ROOT / "configs" / "experiment_gru512.yaml"
 SMOKE_CONFIG = ROOT / "configs" / "smoke.yaml"
 SOURCE_CONFIG = ROOT / "configs" / "source_hyperparameters.yaml"
 
@@ -83,6 +84,18 @@ def test_default_experiment_contract_and_derived_schedule() -> None:
     assert adaptation is not None
     assert adaptation.total_optimizer_steps == 3_048
     assert adaptation.warmup_optimizer_steps == 152
+
+
+def test_gru512_experiment_changes_only_recurrent_width() -> None:
+    baseline = load_config(EXPERIMENT_CONFIG)
+    widened = load_config(GRU512_CONFIG)
+
+    expected = replace(
+        baseline,
+        network=replace(baseline.network, recurrent_hidden_dim=512),
+        source_files=widened.source_files,
+    )
+    assert widened == expected
 
 
 def test_fixed_branch_uses_the_shared_prefix_and_nominal_one_billion_axis() -> None:
