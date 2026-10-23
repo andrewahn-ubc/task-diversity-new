@@ -8,8 +8,7 @@ source "$SCRIPT_DIR/lib/common.sh"
 REPO_ROOT=$(td2_repo_root)
 
 CLUSTER=narval
-ACCOUNT_A=def-krallen
-ACCOUNT_B=def-mijungp
+ACCOUNT=def-krallen
 OUTPUT_ROOT=/scratch/taegyoem/td2-results-10dist-9div-cbp-seeded100-fixed2b-fresh
 DATA_ROOT=''
 CONFIG_PATH="$REPO_ROOT/configs/experiment.yaml"
@@ -23,19 +22,17 @@ Usage: bash scripts/submit_fixed_2b.sh [options]
 
 Trains all 45 fixed-distribution streams from initialization for 2B nominal
 environment steps, then creates the aggregate plot. Existing seed-specific
-task bundles are reused. GPU work is divided between two accounts while their
-combined concurrency never exceeds --max-concurrent.
+task bundles are reused. Every job uses the def-krallen allocation and GPU
+array concurrency never exceeds --max-concurrent.
 
 Options:
   --cluster NAME             Slurm cluster (default: narval)
-  --account-a ACCOUNT        First allocation (default: def-krallen)
-  --account-b ACCOUNT        Second allocation (default: def-mijungp)
   --output-root PATH         New clean 2B output
   --data-root PATH           Existing seed-specific task bundles
                              (default: value saved by setup)
   --config PATH              Experiment configuration
                              (default: configs/experiment.yaml)
-  --max-concurrent N         Combined GPU concurrency cap (default: 100; 2-100)
+  --max-concurrent N         GPU array concurrency cap (default: 100; 1-100)
   --exclude-nodes LIST       Comma-separated Slurm nodes to avoid
                              (default: ng31004,ng31104)
   --resume                   Resume an interrupted clean 2B output root. Refuses
@@ -49,16 +46,6 @@ while (($#)); do
     --cluster)
       (($# >= 2)) || td2_die "--cluster requires a value"
       CLUSTER=$2
-      shift 2
-      ;;
-    --account-a)
-      (($# >= 2)) || td2_die "--account-a requires a value"
-      ACCOUNT_A=$2
-      shift 2
-      ;;
-    --account-b)
-      (($# >= 2)) || td2_die "--account-b requires a value"
-      ACCOUNT_B=$2
       shift 2
       ;;
     --output-root)
@@ -100,18 +87,13 @@ while (($#)); do
   esac
 done
 
-[[ $ACCOUNT_A =~ ^[A-Za-z0-9_.-]+$ ]] || td2_die "invalid account name: $ACCOUNT_A"
-[[ $ACCOUNT_B =~ ^[A-Za-z0-9_.-]+$ ]] || td2_die "invalid account name: $ACCOUNT_B"
-[[ $ACCOUNT_A != "$ACCOUNT_B" ]] || td2_die "--account-a and --account-b must differ"
 td2_require_uint max-concurrent "$MAX_CONCURRENT"
-((MAX_CONCURRENT >= 2 && MAX_CONCURRENT <= 100)) || td2_die \
-  "--max-concurrent must be between 2 and 100"
+((MAX_CONCURRENT >= 1 && MAX_CONCURRENT <= 100)) || td2_die \
+  "--max-concurrent must be between 1 and 100"
 if [[ -n $EXCLUDE_NODES ]]; then
   [[ $EXCLUDE_NODES =~ ^[A-Za-z0-9._,-]+$ ]] || td2_die \
     "invalid --exclude-nodes list: $EXCLUDE_NODES"
 fi
-ACCOUNT_A_CAP=$(( (MAX_CONCURRENT + 1) / 2 ))
-ACCOUNT_B_CAP=$(( MAX_CONCURRENT / 2 ))
 TD2_EXCLUDE_SBATCH_ARGS=()
 if [[ -n $EXCLUDE_NODES ]]; then
   TD2_EXCLUDE_SBATCH_ARGS=("--exclude=$EXCLUDE_NODES")
@@ -220,8 +202,7 @@ else
     "mode=initial" \
     "workflow=fixed_2b_fresh" \
     "cluster=$CLUSTER" \
-    "account_a=$ACCOUNT_A" \
-    "account_b=$ACCOUNT_B" \
+    "account=$ACCOUNT" \
     "config_path=$CONFIG_PATH" \
     "data_root=$DATA_ROOT" \
     "plan_identity=$PLAN_IDENTITY" \
@@ -229,48 +210,36 @@ else
 fi
 
 BASE_EXPORTS="ALL,TD2_RUNTIME_ENV=$TD2_RUNTIME_ENV,TD2_PROFILE=$CLUSTER,TD2_OUTPUT_ROOT=$OUTPUT_ROOT,TD2_DATA_ROOT=$DATA_ROOT,TD2_CONFIG_PATH=$CONFIG_PATH,TD2_SOFT_LIMIT_SECONDS=2700"
-EXPORTS_A="$BASE_EXPORTS,TD2_ACCOUNT=$ACCOUNT_A"
-EXPORTS_B="$BASE_EXPORTS,TD2_ACCOUNT=$ACCOUNT_B"
+EXPORTS="$BASE_EXPORTS,TD2_ACCOUNT=$ACCOUNT"
 td2_build_gpu_sbatch_args
 
 td2_note "submitting 45 clean fixed-distribution 2B streams"
-FIXED_A_SUBMISSION=$(sbatch --parsable \
+FIXED_SUBMISSION=$(sbatch --parsable \
   "${TD2_EXCLUDE_SBATCH_ARGS[@]}" \
-  --account="$ACCOUNT_A" \
+  --account="$ACCOUNT" \
   --chdir="$REPO_ROOT" \
-  --job-name=td2-fresh2b-a \
-  --output="$LOG_ROOT/fresh2b-a-%A_%a.out" \
-  --array="0-44:2%$ACCOUNT_A_CAP" \
+  --job-name=td2-fresh2b \
+  --output="$LOG_ROOT/fresh2b-%A_%a.out" \
+  --array="0-44%$MAX_CONCURRENT" \
   "${TD2_GPU_SBATCH_ARGS[@]}" \
-  --export="$EXPORTS_A" \
+  --export="$EXPORTS" \
   "$REPO_ROOT/slurm/fixed_2b.sbatch")
-FIXED_A_JOB=$(td2_parse_job_id "$FIXED_A_SUBMISSION")
-FIXED_B_SUBMISSION=$(sbatch --parsable \
-  "${TD2_EXCLUDE_SBATCH_ARGS[@]}" \
-  --account="$ACCOUNT_B" \
-  --chdir="$REPO_ROOT" \
-  --job-name=td2-fresh2b-b \
-  --output="$LOG_ROOT/fresh2b-b-%A_%a.out" \
-  --array="1-43:2%$ACCOUNT_B_CAP" \
-  "${TD2_GPU_SBATCH_ARGS[@]}" \
-  --export="$EXPORTS_B" \
-  "$REPO_ROOT/slurm/fixed_2b.sbatch")
-FIXED_B_JOB=$(td2_parse_job_id "$FIXED_B_SUBMISSION")
+FIXED_JOB=$(td2_parse_job_id "$FIXED_SUBMISSION")
 
-td2_note "submitting clean 2B plot after training arrays"
+td2_note "submitting clean 2B plot after the training array"
 AGGREGATE_SUBMISSION=$(sbatch --parsable \
   "${TD2_EXCLUDE_SBATCH_ARGS[@]}" \
-  --account="$ACCOUNT_B" \
+  --account="$ACCOUNT" \
   --chdir="$REPO_ROOT" \
   --job-name=td2-fresh2b-plot \
   --output="$LOG_ROOT/fresh2b-aggregate-%j.out" \
-  --dependency="afterok:$FIXED_A_JOB:$FIXED_B_JOB" \
+  --dependency="afterok:$FIXED_JOB" \
   --kill-on-invalid-dep=yes \
   --nodes=1 \
   --ntasks=1 \
   --cpus-per-task=4 \
   --mem=16G \
-  --export="$EXPORTS_B" \
+  --export="$EXPORTS" \
   "$REPO_ROOT/slurm/aggregate_fixed_2b.sbatch")
 AGGREGATE_JOB=$(td2_parse_job_id "$AGGREGATE_SUBMISSION")
 
@@ -284,23 +253,19 @@ td2_write_receipt "$RECEIPT" \
   "mode=$([[ $RESUME == true ]] && printf resume || printf initial)" \
   "workflow=fixed_2b_fresh" \
   "cluster=$CLUSTER" \
-  "account_a=$ACCOUNT_A" \
-  "account_b=$ACCOUNT_B" \
-  "account_a_cap=$ACCOUNT_A_CAP" \
-  "account_b_cap=$ACCOUNT_B_CAP" \
+  "account=$ACCOUNT" \
   "exclude_nodes=${EXCLUDE_NODES:-none}" \
   "config_path=$CONFIG_PATH" \
   "data_root=$DATA_ROOT" \
   "plan_identity=$PLAN_IDENTITY" \
   "max_concurrent=$MAX_CONCURRENT" \
-  "fixed_a_job=$FIXED_A_JOB" \
-  "fixed_b_job=$FIXED_B_JOB" \
+  "fixed_job=$FIXED_JOB" \
   "fixed_array_size=$STREAM_ARRAY_SIZE" \
   "aggregate_job=$AGGREGATE_JOB" \
   "soft_limit_seconds=2700"
 
 printf '\nSubmitted successfully:\n'
-printf '  clean fixed 2B arrays: %s, %s (%s streams)\n' \
-  "$FIXED_A_JOB" "$FIXED_B_JOB" "$STREAM_ARRAY_SIZE"
+printf '  clean fixed 2B array:  %s (%s streams)\n' \
+  "$FIXED_JOB" "$STREAM_ARRAY_SIZE"
 printf '  aggregate clean 2B plot: %s\n' "$AGGREGATE_JOB"
 printf '  receipt:                %s\n' "$RECEIPT"

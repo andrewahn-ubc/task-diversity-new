@@ -17,8 +17,8 @@ creates the four requested aggregate plots only after every run is complete.
 
 First copy or clone this repository onto a filesystem visible to compute
 nodes, log into Narval as `taegyoem`, and `cd` to the repository root. The
-submission defaults split work between accounts `def-krallen` and
-`def-mijungp`, with one global GPU concurrency cap of 100.
+submission charges every job to Kelsey Allen's `def-krallen` allocation, with
+a GPU array concurrency cap of 100.
 
 ```bash
 bash scripts/setup_compute_canada.sh \
@@ -27,8 +27,6 @@ bash scripts/setup_compute_canada.sh \
 
 bash scripts/submit_all.sh \
   --cluster narval \
-  --account-a def-krallen \
-  --account-b def-mijungp \
   --data-root /scratch/taegyoem/td2-data-10dist-9div-cbp-seeded100 \
   --output-root /scratch/taegyoem/td2-results-10dist-9div-cbp-seeded100-fixed1b \
   --max-concurrent 100
@@ -52,7 +50,7 @@ bash scripts/submit_fixed_2b.sh
 
 The launcher reuses the five existing seed-specific task bundles, but it does
 not load any prior model checkpoint. It submits exactly 45 fresh streams (nine
-diversity levels by five seeds) split between `def-krallen` and `def-mijungp`.
+diversity levels by five seeds), all charged to `def-krallen`.
 It also excludes `ng31004` and `ng31104` by default because those nodes caused
 the earlier Lustre failures. Results are written to
 `/scratch/taegyoem/td2-results-10dist-9div-cbp-seeded100-fixed2b-fresh`.
@@ -272,8 +270,8 @@ configuration and immutable data manifest. A successful incomplete job submits
 itself for requeue under the same array task ID. Every completed stage writes an
 immutable checkpoint and `DONE` marker before the held-out phase begins.
 
-The launcher partitions every production matrix into two disjoint array
-shards, one charged to each configured account. The dependency graph is:
+The launcher submits one array per production phase, all charged to
+`def-krallen`. The dependency graph is:
 
 ```text
 5-way per-seed CPU data preparation
@@ -294,13 +292,11 @@ array throttles instead of becoming unbounded standalone jobs. The held-out
 arrays still load each of the ten continual checkpoints independently; no
 held-out jobs are created for `fixed/`.
 
-`--account-a` and `--account-b` default to `def-krallen` and `def-mijungp`.
-The launcher divides the configured `--max-concurrent 100` budget across the
-account-specific shards, so it remains a workflow-wide cap rather than 100 per
-account. The sparse array split assigns 296 initial task identities to each
-account (293 GPU identities each); later requeues remain on the same account.
-Slurm and the fair share of each allocation determine how many tasks actually
-run.
+The fixed `def-krallen` allocation is used by every submission. The launcher
+applies `--max-concurrent 100` directly to each GPU array; the dependency graph
+prevents production phases from overlapping, so at most 100 experiment GPU
+tasks can run concurrently. Slurm and the allocation's fair share determine
+how many tasks actually run.
 The one-hour GPU and four-hour CPU requests are scheduling-friendly, but no
 script can guarantee a five-day completion time without measuring throughput
 and queue delay on your allocation. The GPU smoke job fails the whole
@@ -327,8 +323,6 @@ no `td2-*` jobs are queued or running, then use the same paths with `--resume`:
 ```bash
 bash scripts/submit_all.sh \
   --cluster narval \
-  --account-a def-krallen \
-  --account-b def-mijungp \
   --data-root /scratch/taegyoem/td2-data-10dist-9div-cbp-seeded100 \
   --output-root /scratch/taegyoem/td2-results-10dist-9div-cbp-seeded100-fixed1b \
   --max-concurrent 100 \
