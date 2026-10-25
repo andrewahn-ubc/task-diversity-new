@@ -16,6 +16,7 @@ from td2.train import _fixed_2b_schedule, _fixed_axis_steps
 ROOT = Path(__file__).resolve().parents[1]
 EXPERIMENT_CONFIG = ROOT / "configs" / "experiment.yaml"
 GRU512_CONFIG = ROOT / "configs" / "experiment_gru512.yaml"
+GRU1024_CONFIG = ROOT / "configs" / "experiment_gru1024.yaml"
 SMOKE_CONFIG = ROOT / "configs" / "smoke.yaml"
 SOURCE_CONFIG = ROOT / "configs" / "source_hyperparameters.yaml"
 
@@ -86,13 +87,19 @@ def test_default_experiment_contract_and_derived_schedule() -> None:
     assert adaptation.warmup_optimizer_steps == 152
 
 
-def test_gru512_experiment_changes_only_recurrent_width() -> None:
+@pytest.mark.parametrize(
+    ("config_path", "hidden_dim"),
+    ((GRU512_CONFIG, 512), (GRU1024_CONFIG, 1024)),
+)
+def test_wider_gru_experiment_changes_only_recurrent_width(
+    config_path: Path, hidden_dim: int
+) -> None:
     baseline = load_config(EXPERIMENT_CONFIG)
-    widened = load_config(GRU512_CONFIG)
+    widened = load_config(config_path)
 
     expected = replace(
         baseline,
-        network=replace(baseline.network, recurrent_hidden_dim=512),
+        network=replace(baseline.network, recurrent_hidden_dim=hidden_dim),
         source_files=widened.source_files,
     )
     assert widened == expected

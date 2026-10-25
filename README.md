@@ -89,6 +89,26 @@ Resume an interrupted submission only after its earlier jobs have stopped:
 bash scripts/submit_fixed_2b_gru512.sh --resume
 ```
 
+### Run the GRU-1024 clean fixed-distribution 2B experiment
+
+To run the same clean 2B experiment with only the recurrent width changed from
+256 to 1024, use:
+
+```bash
+bash scripts/submit_fixed_2b_gru1024.sh
+```
+
+This run also starts from initialization and reuses the same seed-specific task
+bundles. Its wider pre-GRU projection, recurrent carry, GRU matrices, CBP state,
+and actor/critic inputs are derived automatically from the 1024-unit width.
+Results are isolated under
+`/scratch/taegyoem/td2-results-10dist-9div-cbp-seeded100-fixed2b-fresh-gru1024`.
+Resume it only after its earlier jobs have stopped:
+
+```bash
+bash scripts/submit_fixed_2b_gru1024.sh --resume
+```
+
 Do not run the setup command on a compute node. It downloads wheels and exact
 dependency revisions once on the login node; all scheduled jobs then run
 offline. Binary dependencies are installed as non-editable snapshots, while
