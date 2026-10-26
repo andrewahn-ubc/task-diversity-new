@@ -17,6 +17,7 @@ from td2.plot import (
     _validate_coverage,
     create_fixed_2b_fresh_plot,
     create_fixed_2b_plot,
+    create_gru_width_terminal_plot,
     create_plots,
     read_metric_rows,
 )
@@ -24,6 +25,7 @@ from td2.plot import (
 
 ROOT = Path(__file__).resolve().parents[1]
 SMOKE_CONFIG = ROOT / "configs" / "smoke.yaml"
+GPU_SMOKE_CONFIG = ROOT / "configs" / "gpu_smoke.yaml"
 FIELDS = [
     "method",
     "diversity_n",
@@ -421,3 +423,65 @@ def test_create_fixed_2b_fresh_plot_requires_complete_terminal_streams(
     _write_fixed_2b_fresh_fixture(incomplete, terminal_update=31)
     with pytest.raises(PlotDataError, match="terminal global_update"):
         create_fixed_2b_fresh_plot(SMOKE_CONFIG, incomplete)
+
+
+def _write_gru_comparison_fixture(
+    output_root: Path, *, success_rate: float, terminal_update: int = 2
+) -> None:
+    _write_metrics(
+        output_root
+        / "fixed_2b_fresh"
+        / "ppo_cbp"
+        / "diversity_1"
+        / "seed_0"
+        / "metrics.csv",
+        [
+            _row(
+                method="ppo_cbp",
+                mode="fixed_2b_fresh_eval",
+                distribution=1,
+                success_rate=0.1,
+                global_update=0,
+            ),
+            _row(
+                method="ppo_cbp",
+                mode="fixed_2b_fresh_eval",
+                distribution=1,
+                environment_steps=524288,
+                nominal_environment_steps=524288,
+                success_rate=success_rate,
+                global_update=terminal_update,
+            ),
+        ],
+    )
+
+
+def test_gru_width_terminal_plot_uses_exact_terminal_rows(tmp_path: Path) -> None:
+    pytest.importorskip("matplotlib")
+    roots: dict[int, Path] = {}
+    for hidden_dim, success in ((256, 0.4), (512, 0.6), (1024, 0.8)):
+        run_root = tmp_path / f"gru_{hidden_dim}"
+        _write_gru_comparison_fixture(run_root, success_rate=success)
+        roots[hidden_dim] = run_root
+
+    outputs = create_gru_width_terminal_plot(
+        GPU_SMOKE_CONFIG, roots, tmp_path / "comparison"
+    )
+
+    assert len(outputs) == 3
+    assert all(path.is_file() and path.stat().st_size > 0 for path in outputs)
+    with outputs[2].open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert [int(row["gru_hidden_dim"]) for row in rows] == [256, 512, 1024]
+    assert [float(row["mean_success_rate"]) for row in rows] == pytest.approx(
+        [0.4, 0.6, 0.8]
+    )
+
+    incomplete = tmp_path / "incomplete"
+    _write_gru_comparison_fixture(
+        incomplete, success_rate=0.9, terminal_update=1
+    )
+    with pytest.raises(PlotDataError, match="terminal global_update"):
+        create_gru_width_terminal_plot(
+            GPU_SMOKE_CONFIG, {256: incomplete}, tmp_path / "bad-comparison"
+        )

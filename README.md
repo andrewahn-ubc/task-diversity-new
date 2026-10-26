@@ -109,6 +109,17 @@ Resume it only after its earlier jobs have stopped:
 bash scripts/submit_fixed_2b_gru1024.sh --resume
 ```
 
+After the 256-, 512-, and 1024-wide clean 2B runs are complete, generate the
+terminal-width comparison directly from their full Narval `metrics.csv` logs:
+
+```bash
+bash scripts/plot_gru_width_comparison.sh
+```
+
+This lightweight command is suitable for a login node. It writes PNG, PDF,
+and the underlying mean/SEM table under
+`/scratch/taegyoem/td2-results-10dist-9div-cbp-seeded100-fixed2b-gru-comparison/plots`.
+
 Do not run the setup command on a compute node. It downloads wheels and exact
 dependency revisions once on the login node; all scheduled jobs then run
 offline. Binary dependencies are installed as non-editable snapshots, while

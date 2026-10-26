@@ -752,6 +752,29 @@ def create_fixed_2b_fresh_plot(
         for row in read_metric_rows(output_root)
         if row.mode == "fixed_2b_fresh_eval" and math.isfinite(row.success_rate)
     ]
+    _validate_fixed_2b_fresh_terminal_updates(rows, config)
+
+    plot_dir = Path(output_root).expanduser().resolve() / "plots"
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    destination = plot_dir / "fixed_distribution_evaluation_success_2b_fresh"
+    _line_plot(
+        rows,
+        config=config,
+        metric=lambda row: row.success_rate,
+        ylabel="Evaluation success rate",
+        title="Fixed-distribution evaluation through 2B steps (clean schedule)",
+        destination=destination,
+        show_boundaries=False,
+        xlabel="Fixed-distribution environment steps (millions)",
+    )
+    return [destination.with_suffix(".png"), destination.with_suffix(".pdf")]
+
+
+def _validate_fixed_2b_fresh_terminal_updates(
+    rows: Sequence[MetricRow], config: TD2Config
+) -> int:
+    """Require a complete, exactly-terminal clean-2B evaluation dataset."""
+
     _validate_coverage(rows, config, mode="fixed_2b_fresh_eval")
     target = 2 * config.derived.total_training_updates_per_stream
     terminal_updates: dict[tuple[str, int, int], int] = {}
@@ -773,21 +796,128 @@ def create_fixed_2b_fresh_plot(
             "fixed_2b_fresh_eval metrics have incorrect terminal global_update "
             f"(expected {target}): {preview}{suffix}"
         )
+    return target
+
+
+def create_gru_width_terminal_plot(
+    config_path: str | Path,
+    run_roots: Mapping[int, str | Path],
+    output_root: str | Path,
+) -> list[Path]:
+    """Compare exact terminal clean-2B success across recurrent widths."""
+
+    config = load_config(config_path)
+    if len(config.experiment.methods) != 1:
+        raise PlotDataError(
+            "GRU-width comparison requires exactly one configured method"
+        )
+    if not run_roots:
+        raise PlotDataError("GRU-width comparison requires at least one run root")
+
+    expected_levels = tuple(config.experiment.diversity_levels)
+    expected_seeds = tuple(config.runtime.seeds)
+    method = config.experiment.methods[0]
+    summaries: dict[int, list[tuple[int, float, float, int]]] = {}
+
+    for hidden_dim, run_root in sorted(run_roots.items()):
+        if hidden_dim <= 0:
+            raise PlotDataError(f"invalid GRU hidden width: {hidden_dim}")
+        rows = [
+            row
+            for row in read_metric_rows(run_root)
+            if row.mode == "fixed_2b_fresh_eval"
+            and row.distribution == 1
+            and math.isfinite(row.success_rate)
+        ]
+        target = _validate_fixed_2b_fresh_terminal_updates(rows, config)
+        terminal: dict[tuple[int, int], float] = {}
+        for row in rows:
+            if row.method == method and row.global_update == target:
+                terminal[(row.diversity_n2, row.seed)] = row.success_rate
+
+        curve: list[tuple[int, float, float, int]] = []
+        for level in expected_levels:
+            values = [terminal[(level, seed)] for seed in expected_seeds]
+            mean, sem, count = _mean_sem(values)
+            curve.append((level, mean, sem, count))
+        summaries[hidden_dim] = curve
 
     plot_dir = Path(output_root).expanduser().resolve() / "plots"
     plot_dir.mkdir(parents=True, exist_ok=True)
-    destination = plot_dir / "fixed_distribution_evaluation_success_2b_fresh"
-    _line_plot(
-        rows,
-        config=config,
-        metric=lambda row: row.success_rate,
-        ylabel="Evaluation success rate",
-        title="Fixed-distribution evaluation through 2B steps (clean schedule)",
-        destination=destination,
-        show_boundaries=False,
-        xlabel="Fixed-distribution environment steps (millions)",
+    destination = plot_dir / "gru_width_terminal_evaluation_success_2b"
+
+    import matplotlib.pyplot as plt
+
+    figure, axis = plt.subplots(figsize=(9.2, 5.2), constrained_layout=True)
+    colors = plt.get_cmap("viridis")(
+        np.linspace(0.12, 0.88, max(1, len(summaries)))
     )
-    return [destination.with_suffix(".png"), destination.with_suffix(".pdf")]
+    for color, (hidden_dim, curve) in zip(colors, sorted(summaries.items())):
+        x = np.asarray([point[0] for point in curve], dtype=float)
+        mean = np.asarray([point[1] for point in curve], dtype=float)
+        sem = np.asarray([point[2] for point in curve], dtype=float)
+        axis.errorbar(
+            x,
+            mean,
+            yerr=sem,
+            color=color,
+            marker="o",
+            markersize=5,
+            linewidth=2,
+            capsize=3,
+            label=f"GRU width {hidden_dim}",
+        )
+
+    axis.set_xscale("log", base=4)
+    axis.set_xticks(expected_levels)
+    axis.set_xticklabels(
+        [f"{math.isqrt(level)}²" for level in expected_levels]
+    )
+    axis.set(
+        xlabel="Training-task diversity (number of tasks; log₄ scale)",
+        ylabel="Evaluation success rate at 2B steps",
+        title="Terminal evaluation performance after 2B steps",
+        ylim=(-0.02, 1.02),
+    )
+    axis.grid(axis="y", alpha=0.20)
+    axis.legend(frameon=False)
+    for suffix in (".png", ".pdf"):
+        _atomic_save_figure(figure, destination.with_suffix(suffix))
+    plt.close(figure)
+
+    summary_path = destination.with_suffix(".csv")
+    temporary = summary_path.with_name(
+        f"{summary_path.stem}.tmp{summary_path.suffix}"
+    )
+    with temporary.open("w", encoding="utf-8", newline="") as handle:
+        fields = [
+            "gru_hidden_dim",
+            "diversity_n",
+            "diversity_n2",
+            "mean_success_rate",
+            "sem_success_rate",
+            "num_seeds",
+        ]
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        for hidden_dim, curve in sorted(summaries.items()):
+            for level, mean, sem, count in curve:
+                writer.writerow(
+                    {
+                        "gru_hidden_dim": hidden_dim,
+                        "diversity_n": math.isqrt(level),
+                        "diversity_n2": level,
+                        "mean_success_rate": mean,
+                        "sem_success_rate": sem,
+                        "num_seeds": count,
+                    }
+                )
+    os.replace(temporary, summary_path)
+    return [
+        destination.with_suffix(".png"),
+        destination.with_suffix(".pdf"),
+        summary_path,
+    ]
 
 
 def create_plots(
@@ -890,6 +1020,18 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="write only the clean fixed-distribution 2B plot",
     )
+    parser.add_argument(
+        "--gru-width-comparison",
+        action="store_true",
+        help="compare terminal clean-2B performance across GRU widths",
+    )
+    parser.add_argument(
+        "--gru-width-run",
+        action="append",
+        nargs=2,
+        metavar=("WIDTH", "OUTPUT_ROOT"),
+        help="GRU width and completed clean-2B result root; repeat per width",
+    )
     parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
     return parser
 
@@ -898,9 +1040,33 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     if not 0.0 <= args.threshold <= 1.0:
         raise SystemExit("--threshold must be in [0, 1]")
-    if args.fixed_2b_only and args.fixed_2b_fresh_only:
-        raise SystemExit("choose only one fixed-2B plotting mode")
-    if args.fixed_2b_only:
+    modes = sum(
+        (args.fixed_2b_only, args.fixed_2b_fresh_only, args.gru_width_comparison)
+    )
+    if modes > 1:
+        raise SystemExit("choose only one specialized plotting mode")
+    if args.gru_width_comparison:
+        if args.source_output_root is not None:
+            raise SystemExit(
+                "--source-output-root is not used with --gru-width-comparison"
+            )
+        if not args.gru_width_run:
+            raise SystemExit(
+                "--gru-width-comparison requires at least one --gru-width-run"
+            )
+        run_roots: dict[int, Path] = {}
+        for width_text, root_text in args.gru_width_run:
+            try:
+                width = int(width_text)
+            except ValueError as error:
+                raise SystemExit(f"invalid GRU width: {width_text}") from error
+            if width in run_roots:
+                raise SystemExit(f"duplicate GRU width: {width}")
+            run_roots[width] = Path(root_text)
+        outputs = create_gru_width_terminal_plot(
+            args.config, run_roots, args.output_root
+        )
+    elif args.fixed_2b_only:
         if args.source_output_root is None:
             raise SystemExit("--fixed-2b-only requires --source-output-root")
         outputs = create_fixed_2b_plot(
@@ -920,6 +1086,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             threshold=args.threshold,
         )
     else:
+        if args.gru_width_run:
+            raise SystemExit("--gru-width-run requires --gru-width-comparison")
         if args.source_output_root is not None:
             raise SystemExit("--source-output-root requires --fixed-2b-only")
         outputs = create_plots(args.config, args.output_root, threshold=args.threshold)
