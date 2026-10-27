@@ -17,6 +17,7 @@ from td2.plot import (
     _validate_coverage,
     create_fixed_2b_fresh_plot,
     create_fixed_2b_plot,
+    create_fixed_horizon_terminal_plot,
     create_gru_width_terminal_plot,
     create_plots,
     read_metric_rows,
@@ -484,4 +485,74 @@ def test_gru_width_terminal_plot_uses_exact_terminal_rows(tmp_path: Path) -> Non
     with pytest.raises(PlotDataError, match="terminal global_update"):
         create_gru_width_terminal_plot(
             GPU_SMOKE_CONFIG, {256: incomplete}, tmp_path / "bad-comparison"
+        )
+
+
+def _write_fixed_horizon_1b_fixture(
+    output_root: Path, *, success_rate: float, terminal_update: int = 1
+) -> None:
+    _write_metrics(
+        output_root
+        / "fixed"
+        / "ppo_cbp"
+        / "diversity_1"
+        / "seed_0"
+        / "metrics.csv",
+        [
+            _row(
+                method="ppo_cbp",
+                mode="fixed_eval",
+                distribution=1,
+                success_rate=0.1,
+                global_update=0,
+            ),
+            _row(
+                method="ppo_cbp",
+                mode="fixed_eval",
+                distribution=1,
+                environment_steps=262144,
+                nominal_environment_steps=262144,
+                success_rate=success_rate,
+                global_update=terminal_update,
+            ),
+        ],
+    )
+
+
+def test_fixed_horizon_terminal_plot_uses_exact_1b_and_2b_roots(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("matplotlib")
+    one_b_root = tmp_path / "fixed_1b"
+    two_b_root = tmp_path / "fixed_2b_fresh"
+    _write_fixed_horizon_1b_fixture(one_b_root, success_rate=0.45)
+    _write_gru_comparison_fixture(two_b_root, success_rate=0.75)
+
+    outputs = create_fixed_horizon_terminal_plot(
+        GPU_SMOKE_CONFIG,
+        one_b_root,
+        two_b_root,
+        tmp_path / "comparison",
+    )
+
+    assert len(outputs) == 3
+    assert all(path.is_file() and path.stat().st_size > 0 for path in outputs)
+    with outputs[2].open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert [int(row["training_steps_billions"]) for row in rows] == [1, 2]
+    assert [int(row["gru_hidden_dim"]) for row in rows] == [256, 256]
+    assert [float(row["mean_success_rate"]) for row in rows] == pytest.approx(
+        [0.45, 0.75]
+    )
+
+    incomplete = tmp_path / "incomplete_1b"
+    _write_fixed_horizon_1b_fixture(
+        incomplete, success_rate=0.9, terminal_update=0
+    )
+    with pytest.raises(PlotDataError, match="terminal global_update"):
+        create_fixed_horizon_terminal_plot(
+            GPU_SMOKE_CONFIG,
+            incomplete,
+            two_b_root,
+            tmp_path / "bad-comparison",
         )

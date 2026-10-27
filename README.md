@@ -120,6 +120,23 @@ This lightweight command is suitable for a login node. It writes PNG, PDF,
 and the underlying mean/SEM table under
 `/scratch/taegyoem/td2-results-10dist-9div-cbp-seeded100-fixed2b-gru-comparison/plots`.
 
+To compare the terminal GRU-256 performance from the original 1B fixed run
+against the independently trained clean 2B run, use:
+
+```bash
+bash scripts/plot_fixed_horizon_comparison.sh
+```
+
+This login-node command reads the original 1B root
+`/scratch/taegyoem/td2-results-10dist-9div-cbp-seeded100-fixed1b` and the clean
+2B root
+`/scratch/taegyoem/td2-results-10dist-9div-cbp-seeded100-fixed2b-fresh`. It
+requires all 45 exact terminal checkpoints, then writes PNG, PDF, and the
+mean/SEM table under
+`/scratch/taegyoem/td2-results-10dist-9div-cbp-seeded100-fixed1b-vs-fixed2b-gru256-comparison/plots`.
+The two lines are separate experiments with their respective 1B and clean 2B
+learning-rate schedules; the 2B line is not the older 1B-to-2B extension.
+
 Do not run the setup command on a compute node. It downloads wheels and exact
 dependency revisions once on the login node; all scheduled jobs then run
 offline. Binary dependencies are installed as non-editable snapshots, while

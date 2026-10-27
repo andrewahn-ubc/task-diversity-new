@@ -799,6 +799,35 @@ def _validate_fixed_2b_fresh_terminal_updates(
     return target
 
 
+def _validate_fixed_1b_terminal_updates(
+    rows: Sequence[MetricRow], config: TD2Config
+) -> int:
+    """Require a complete, exactly-terminal original fixed-1B dataset."""
+
+    _validate_coverage(rows, config, mode="fixed_eval")
+    target = config.derived.total_training_updates_per_stream
+    terminal_updates: dict[tuple[str, int, int], int] = {}
+    for row in rows:
+        key = (row.method, row.diversity_n, row.seed)
+        terminal_updates[key] = max(terminal_updates.get(key, -1), row.global_update)
+    wrong = sorted(
+        (*key, update)
+        for key, update in terminal_updates.items()
+        if update != target
+    )
+    if wrong:
+        preview = ", ".join(
+            f"{method}/n={width}/seed={seed}: {update}"
+            for method, width, seed, update in wrong[:8]
+        )
+        suffix = " ..." if len(wrong) > 8 else ""
+        raise PlotDataError(
+            "fixed_eval metrics have incorrect terminal global_update "
+            f"(expected {target}): {preview}{suffix}"
+        )
+    return target
+
+
 def create_gru_width_terminal_plot(
     config_path: str | Path,
     run_roots: Mapping[int, str | Path],
@@ -910,6 +939,143 @@ def create_gru_width_terminal_plot(
                         "mean_success_rate": mean,
                         "sem_success_rate": sem,
                         "num_seeds": count,
+                    }
+                )
+    os.replace(temporary, summary_path)
+    return [
+        destination.with_suffix(".png"),
+        destination.with_suffix(".pdf"),
+        summary_path,
+    ]
+
+
+def create_fixed_horizon_terminal_plot(
+    config_path: str | Path,
+    one_b_root: str | Path,
+    two_b_root: str | Path,
+    output_root: str | Path,
+) -> list[Path]:
+    """Compare GRU-256 terminal success after independent 1B and 2B runs."""
+
+    config = load_config(config_path)
+    if len(config.experiment.methods) != 1:
+        raise PlotDataError(
+            "fixed-horizon comparison requires exactly one configured method"
+        )
+    if config.network.recurrent_hidden_dim != 256:
+        raise PlotDataError(
+            "fixed-horizon comparison requires a configured GRU width of 256"
+        )
+
+    expected_levels = tuple(config.experiment.diversity_levels)
+    expected_seeds = tuple(config.runtime.seeds)
+    method = config.experiment.methods[0]
+    run_specs = (
+        (1, Path(one_b_root), "fixed_eval", _validate_fixed_1b_terminal_updates),
+        (
+            2,
+            Path(two_b_root),
+            "fixed_2b_fresh_eval",
+            _validate_fixed_2b_fresh_terminal_updates,
+        ),
+    )
+    summaries: dict[int, tuple[int, list[tuple[int, float, float, int]]]] = {}
+
+    for horizon, run_root, mode, validate in run_specs:
+        rows = [
+            row
+            for row in read_metric_rows(run_root)
+            if row.mode == mode
+            and row.distribution == 1
+            and math.isfinite(row.success_rate)
+        ]
+        target = validate(rows, config)
+        terminal: dict[tuple[int, int], float] = {}
+        for row in rows:
+            if row.method == method and row.global_update == target:
+                terminal[(row.diversity_n2, row.seed)] = row.success_rate
+
+        curve: list[tuple[int, float, float, int]] = []
+        for level in expected_levels:
+            values = [terminal[(level, seed)] for seed in expected_seeds]
+            mean, sem, count = _mean_sem(values)
+            curve.append((level, mean, sem, count))
+        summaries[horizon] = (target, curve)
+
+    plot_dir = Path(output_root).expanduser().resolve() / "plots"
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    destination = plot_dir / "gru256_terminal_evaluation_success_1b_vs_2b"
+
+    import matplotlib.pyplot as plt
+
+    figure, axis = plt.subplots(figsize=(9.2, 5.2), constrained_layout=True)
+    colors = plt.get_cmap("viridis")(
+        np.linspace(0.18, 0.72, max(1, len(summaries)))
+    )
+    for color, (horizon, (_target, curve)) in zip(
+        colors, sorted(summaries.items())
+    ):
+        x = np.asarray([point[0] for point in curve], dtype=float)
+        mean = np.asarray([point[1] for point in curve], dtype=float)
+        sem = np.asarray([point[2] for point in curve], dtype=float)
+        axis.errorbar(
+            x,
+            mean,
+            yerr=sem,
+            color=color,
+            marker="o",
+            markersize=5,
+            linewidth=2,
+            capsize=3,
+            label=f"{horizon}B-step schedule",
+        )
+
+    axis.set_xscale("log", base=4)
+    axis.set_xticks(expected_levels)
+    axis.set_xticklabels(
+        [f"{math.isqrt(level)}²" for level in expected_levels]
+    )
+    axis.set(
+        xlabel="Training-task diversity (number of tasks; log₄ scale)",
+        ylabel="Evaluation success rate at terminal checkpoint",
+        title="Terminal evaluation: 1B vs 2B steps (GRU width 256)",
+        ylim=(-0.02, 1.02),
+    )
+    axis.grid(axis="y", alpha=0.20)
+    axis.legend(frameon=False)
+    for suffix in (".png", ".pdf"):
+        _atomic_save_figure(figure, destination.with_suffix(suffix))
+    plt.close(figure)
+
+    summary_path = destination.with_suffix(".csv")
+    temporary = summary_path.with_name(
+        f"{summary_path.stem}.tmp{summary_path.suffix}"
+    )
+    with temporary.open("w", encoding="utf-8", newline="") as handle:
+        fields = [
+            "training_steps_billions",
+            "gru_hidden_dim",
+            "diversity_n",
+            "diversity_n2",
+            "mean_success_rate",
+            "sem_success_rate",
+            "num_seeds",
+            "terminal_global_update",
+        ]
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        for horizon, (target, curve) in sorted(summaries.items()):
+            for level, mean, sem, count in curve:
+                writer.writerow(
+                    {
+                        "training_steps_billions": horizon,
+                        "gru_hidden_dim": 256,
+                        "diversity_n": math.isqrt(level),
+                        "diversity_n2": level,
+                        "mean_success_rate": mean,
+                        "sem_success_rate": sem,
+                        "num_seeds": count,
+                        "terminal_global_update": target,
                     }
                 )
     os.replace(temporary, summary_path)
@@ -1032,6 +1198,21 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar=("WIDTH", "OUTPUT_ROOT"),
         help="GRU width and completed clean-2B result root; repeat per width",
     )
+    parser.add_argument(
+        "--fixed-horizon-comparison",
+        action="store_true",
+        help="compare terminal GRU-256 performance after independent 1B and 2B runs",
+    )
+    parser.add_argument(
+        "--fixed-1b-root",
+        type=Path,
+        help="completed original GRU-256 fixed-distribution 1B result root",
+    )
+    parser.add_argument(
+        "--fixed-2b-root",
+        type=Path,
+        help="completed clean GRU-256 fixed-distribution 2B result root",
+    )
     parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
     return parser
 
@@ -1041,11 +1222,40 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not 0.0 <= args.threshold <= 1.0:
         raise SystemExit("--threshold must be in [0, 1]")
     modes = sum(
-        (args.fixed_2b_only, args.fixed_2b_fresh_only, args.gru_width_comparison)
+        (
+            args.fixed_2b_only,
+            args.fixed_2b_fresh_only,
+            args.gru_width_comparison,
+            args.fixed_horizon_comparison,
+        )
     )
     if modes > 1:
         raise SystemExit("choose only one specialized plotting mode")
-    if args.gru_width_comparison:
+    if not args.fixed_horizon_comparison and (
+        args.fixed_1b_root is not None or args.fixed_2b_root is not None
+    ):
+        raise SystemExit(
+            "--fixed-1b-root and --fixed-2b-root require "
+            "--fixed-horizon-comparison"
+        )
+    if args.fixed_horizon_comparison:
+        if args.source_output_root is not None or args.gru_width_run:
+            raise SystemExit(
+                "fixed-horizon comparison does not use --source-output-root "
+                "or --gru-width-run"
+            )
+        if args.fixed_1b_root is None or args.fixed_2b_root is None:
+            raise SystemExit(
+                "--fixed-horizon-comparison requires both --fixed-1b-root "
+                "and --fixed-2b-root"
+            )
+        outputs = create_fixed_horizon_terminal_plot(
+            args.config,
+            args.fixed_1b_root,
+            args.fixed_2b_root,
+            args.output_root,
+        )
+    elif args.gru_width_comparison:
         if args.source_output_root is not None:
             raise SystemExit(
                 "--source-output-root is not used with --gru-width-comparison"
