@@ -147,11 +147,27 @@ same seed-specific `16²` core and half from the selected auxiliary pool. The
 auxiliary pools are disjoint from the core and nested within a seed.
 
 Once the existing `/scratch/taegyoem/td2-runtime` setup is available, submit
-the complete data, validation, training, and plotting chain with one command:
+the complete data, validation, training, and plotting chain with one command
+on Narval:
 
 ```bash
 bash scripts/submit_core_aux_2b.sh
 ```
+
+On Fir, use a separate clone of this same repository and build a Fir-local
+runtime once. Fir and Narval scratch filesystems are separate, so these paths
+do not replace or modify the Narval checkout or its files:
+
+```bash
+bash scripts/setup_compute_canada.sh \
+  --runtime-root /scratch/taegyoem/td2-runtime \
+  --data-root /scratch/taegyoem/td2-data-core-aux-16sq-50-50-seeded
+
+bash scripts/submit_core_aux_2b.sh --cluster fir
+```
+
+The Fir profile requests one full H100 per GPU job. Narval remains the default
+and continues to request one A100 with its existing excluded-node list.
 
 Every job uses `def-krallen`. The launcher creates fresh data under
 `/scratch/taegyoem/td2-data-core-aux-16sq-50-50-seeded` and results under

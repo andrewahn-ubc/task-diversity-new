@@ -16,8 +16,8 @@ usage() {
   cat <<'USAGE'
 Usage: bash scripts/setup_compute_canada.sh [options]
 
-Builds a project-local, offline-capable Python environment on a Narval or
-Rorqual login node.  Login-node network access is used only by this command.
+Builds a project-local, offline-capable Python environment on a Narval, Fir,
+or Rorqual login node. Login-node network access is used only by this command.
 
 Options:
   --runtime-root PATH  Durable venv/wheel/source directory

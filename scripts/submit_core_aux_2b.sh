@@ -14,7 +14,8 @@ DATA_ROOT=/scratch/taegyoem/td2-data-core-aux-16sq-50-50-seeded
 CONFIG_PATH="$REPO_ROOT/configs/core_aux_2b.yaml"
 DATA_CONFIG_PATH="$REPO_ROOT/configs/core_aux_data.yaml"
 MAX_CONCURRENT=25
-EXCLUDE_NODES=ng31004,ng31104
+EXCLUDE_NODES=''
+EXCLUDE_NODES_WAS_SET=false
 RESUME=false
 
 usage() {
@@ -22,11 +23,13 @@ usage() {
 Usage: bash scripts/submit_core_aux_2b.sh [options]
 
 Submits the five seed-specific core/auxiliary data bundles, a protocol-shaped
-GPU smoke gate, 25 PPO+CBP training streams, and aggregate plots on Narval.
+GPU smoke gate, 25 PPO+CBP training streams, and aggregate plots.
 Every job uses the def-krallen allocation. Training jobs checkpoint and requeue
 within one-hour allocations.
 
 Options:
+  --cluster NAME             Slurm cluster: narval, fir, or rorqual
+                             (default: narval)
   --output-root PATH         Core/auxiliary experiment output
   --data-root PATH           Core/auxiliary immutable data bundles
   --config PATH              Training configuration
@@ -36,7 +39,8 @@ Options:
   --max-concurrent N         Training-array concurrency cap
                              (default: 25; 1-25)
   --exclude-nodes LIST       Comma-separated Slurm nodes to avoid
-                             (default: ng31004,ng31104)
+                             (default on Narval: ng31004,ng31104;
+                             default elsewhere: none)
   --resume                   Resume an interrupted output root. Refuses to run
                              while any td2-* jobs are queued or running.
   -h, --help                 Show this help
@@ -45,6 +49,11 @@ USAGE
 
 while (($#)); do
   case "$1" in
+    --cluster)
+      (($# >= 2)) || td2_die "--cluster requires a value"
+      CLUSTER=$2
+      shift 2
+      ;;
     --output-root)
       (($# >= 2)) || td2_die "--output-root requires a path"
       OUTPUT_ROOT=$2
@@ -73,6 +82,7 @@ while (($#)); do
     --exclude-nodes)
       (($# >= 2)) || td2_die "--exclude-nodes requires a value"
       EXCLUDE_NODES=$2
+      EXCLUDE_NODES_WAS_SET=true
       shift 2
       ;;
     --resume)
@@ -88,6 +98,10 @@ while (($#)); do
       ;;
   esac
 done
+
+if [[ $EXCLUDE_NODES_WAS_SET == false && $CLUSTER == narval ]]; then
+  EXCLUDE_NODES=ng31004,ng31104
+fi
 
 td2_require_uint max-concurrent "$MAX_CONCURRENT"
 ((MAX_CONCURRENT >= 1 && MAX_CONCURRENT <= 25)) || td2_die \
@@ -185,7 +199,7 @@ done
 CURRENT_CLUSTER=$(scontrol show config 2>/dev/null | awk \
   '$1 == "ClusterName" && !found {name=tolower($3); found=1} END {if (found) print name}')
 if [[ -n $CURRENT_CLUSTER && $CURRENT_CLUSTER != "$CLUSTER" ]]; then
-  td2_die "connected Slurm cluster is '$CURRENT_CLUSTER', but this workflow requires Narval"
+  td2_die "connected Slurm cluster is '$CURRENT_CLUSTER', but --cluster requested '$CLUSTER'"
 fi
 
 mkdir -p -- "$OUTPUT_ROOT" "$DATA_ROOT"

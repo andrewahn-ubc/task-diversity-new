@@ -53,8 +53,8 @@ td2_load_runtime() {
 td2_load_profile() {
   local repo_root=$1
   local profile=$2
-  [[ $profile =~ ^(narval|rorqual)$ ]] || td2_die \
-    "cluster must be 'narval' or 'rorqual' (got: $profile)"
+  [[ $profile =~ ^(narval|fir|rorqual)$ ]] || td2_die \
+    "cluster must be 'narval', 'fir', or 'rorqual' (got: $profile)"
   local profile_file="$repo_root/slurm/profiles/$profile.env"
   [[ -f $profile_file ]] || td2_die "missing cluster profile: $profile_file"
   # The profile files are version-controlled constant assignments.
