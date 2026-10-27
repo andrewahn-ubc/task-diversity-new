@@ -54,6 +54,27 @@ class PoolSpec:
         return self.fixed_pair_depths is not None
 
 
+@dataclass(frozen=True)
+class CoreAuxPoolSpec:
+    """One disjoint core/auxiliary view of a width-272 task bank."""
+
+    packed_rulesets: Array
+    obstacle_masks: Array
+    reachable_masks: Array
+    core_rule_local_indices_by_depth: Array
+    auxiliary_rule_local_indices_by_depth: Array
+    core_layout_indices: Array
+    auxiliary_layout_indices: Array
+    auxiliary_n: int
+    max_n: int
+    num_depths: int = 6
+    distractor_table: Array | None = None
+
+    @property
+    def core_n(self) -> int:
+        return int(self.core_layout_indices.shape[0])
+
+
 def _manifest_path(data_root: str | Path) -> Path:
     return Path(data_root).expanduser().resolve() / "manifest.json"
 
@@ -120,6 +141,98 @@ def load_pool_spec(
         distribution_index=int(distribution_index),
         num_depths=num_depths,
         **kwargs,
+    )
+
+
+def load_core_aux_pool_spec(
+    data_root: str | Path,
+    *,
+    auxiliary_n: int,
+) -> CoreAuxPoolSpec:
+    """Load and validate one core/auxiliary bank generated for this protocol."""
+
+    from td2.core_aux_data import (
+        AUXILIARY_WIDTHS,
+        CORE_N,
+        NUM_DEPTHS,
+        PROTOCOL,
+        SCHEMA_VERSION,
+        STORAGE_N,
+        validate_core_aux_partition,
+    )
+
+    root = Path(data_root).expanduser().resolve()
+    with _manifest_path(root).open("r", encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    if manifest.get("protocol") != PROTOCOL:
+        raise ValueError(
+            f"expected {PROTOCOL!r} data at {root}, got "
+            f"{manifest.get('protocol')!r}"
+        )
+    if int(manifest.get("schema_version", -1)) != SCHEMA_VERSION:
+        raise ValueError(
+            f"unsupported core/aux schema: {manifest.get('schema_version')!r}"
+        )
+    if int(manifest.get("core_n", -1)) != CORE_N:
+        raise ValueError(f"core_n must be {CORE_N}")
+    widths = tuple(int(value) for value in manifest["auxiliary_widths"])
+    if widths != AUXILIARY_WIDTHS:
+        raise ValueError(
+            f"auxiliary widths must be {AUXILIARY_WIDTHS}, got {widths}"
+        )
+    if int(auxiliary_n) not in widths:
+        raise ValueError(
+            f"auxiliary_n must be one of {widths}, got {auxiliary_n}"
+        )
+    num_depths = int(manifest["num_depths"])
+    if num_depths != NUM_DEPTHS:
+        raise ValueError(f"num_depths must be {NUM_DEPTHS}, got {num_depths}")
+    max_n = int(manifest["storage_n_per_depth"])
+    if max_n != STORAGE_N:
+        raise ValueError(f"storage_n_per_depth must be {STORAGE_N}, got {max_n}")
+    partition = manifest["partition"]
+    validate_core_aux_partition(partition, num_depths=num_depths)
+
+    dataset_path = root / manifest["ruleset_file"]
+    packed = load_packed_u32_bz2(str(dataset_path.parent), dataset_path.name)
+    expected_rows = num_depths * max_n
+    if packed.shape[0] != expected_rows:
+        raise ValueError(
+            f"Ruleset rows mismatch for {dataset_path}: "
+            f"{packed.shape[0]} != {expected_rows}"
+        )
+    with np.load(root / manifest["layouts_file"], allow_pickle=False) as layouts:
+        masks_np = np.asarray(layouts["obstacle_mask"], dtype=np.bool_)
+        reachable_np = np.asarray(layouts["reachable_mask"], dtype=np.bool_)
+    if masks_np.shape != (max_n, 6, 6) or reachable_np.shape != masks_np.shape:
+        raise ValueError(
+            "core/aux layout arrays do not match the manifest storage width"
+        )
+
+    distractor_table = jnp.asarray(
+        np.load(root / manifest["distractor_file"], allow_pickle=False),
+        dtype=jnp.int32,
+    )
+    return CoreAuxPoolSpec(
+        packed_rulesets=jnp.asarray(packed, dtype=jnp.uint32),
+        obstacle_masks=jnp.asarray(masks_np, dtype=jnp.bool_),
+        reachable_masks=jnp.asarray(reachable_np, dtype=jnp.bool_),
+        core_rule_local_indices_by_depth=jnp.asarray(
+            partition["core_rule_local_indices_by_depth"], dtype=jnp.int32
+        ),
+        auxiliary_rule_local_indices_by_depth=jnp.asarray(
+            partition["auxiliary_rule_local_indices_by_depth"], dtype=jnp.int32
+        ),
+        core_layout_indices=jnp.asarray(
+            partition["core_layout_indices"], dtype=jnp.int32
+        ),
+        auxiliary_layout_indices=jnp.asarray(
+            partition["auxiliary_layout_indices"], dtype=jnp.int32
+        ),
+        auxiliary_n=int(auxiliary_n),
+        max_n=max_n,
+        num_depths=num_depths,
+        distractor_table=distractor_table,
     )
 
 
@@ -291,6 +404,184 @@ class VectorBanyan:
             episode_length=jnp.where(done, 0, episode_length),
         )
         return obs, next_state, reward, done, info
+
+
+def core_aux_slot_assignments(num_envs: int) -> Array:
+    """Return the fixed alternating auxiliary-slot mask for an exact 50/50 split."""
+
+    if num_envs <= 0 or num_envs % 2:
+        raise ValueError("core/aux training requires a positive even num_envs")
+    return jnp.arange(int(num_envs), dtype=jnp.int32) % 2 == 1
+
+
+class VectorCoreAuxBanyan(VectorBanyan):
+    """Banyan vector environment with fixed half-core, half-auxiliary slots.
+
+    A slot never changes banks, including after automatic episode resets.  As
+    a result, every rollout step contains exactly the same number of core and
+    auxiliary transitions, independent of episode-length differences.
+    """
+
+    def __init__(
+        self,
+        pool: CoreAuxPoolSpec,
+        *,
+        num_envs: int,
+        grid_size: int = 6,
+        max_steps: int = 256,
+        include_rules_in_obs: bool = True,
+        distractor_combine_penalty: float = -0.1,
+    ) -> None:
+        assignments = core_aux_slot_assignments(num_envs)
+        compatibility_pool = PoolSpec(
+            packed_rulesets=pool.packed_rulesets,
+            obstacle_masks=pool.obstacle_masks,
+            reachable_masks=pool.reachable_masks,
+            active_n=pool.core_n,
+            max_n=pool.max_n,
+            distribution_index=0,
+            num_depths=pool.num_depths,
+            distractor_table=pool.distractor_table,
+        )
+        super().__init__(
+            compatibility_pool,
+            num_envs=num_envs,
+            grid_size=grid_size,
+            max_steps=max_steps,
+            include_rules_in_obs=include_rules_in_obs,
+            distractor_combine_penalty=distractor_combine_penalty,
+        )
+        self.core_aux_pool = pool
+        self.slot_is_auxiliary = assignments
+
+    def _sample_indices_for_bank(
+        self, key: Array, is_auxiliary: Array
+    ) -> tuple[Array, Array]:
+        pool = self.core_aux_pool
+
+        def sample_core(key: Array) -> tuple[Array, Array]:
+            key_depth, key_rule, key_layout = jax.random.split(key, 3)
+            depth = jax.random.randint(
+                key_depth, (), 0, pool.num_depths, dtype=jnp.int32
+            )
+            rule_position = jax.random.randint(
+                key_rule, (), 0, pool.core_n, dtype=jnp.int32
+            )
+            layout_position = jax.random.randint(
+                key_layout, (), 0, pool.core_n, dtype=jnp.int32
+            )
+            rule_local = pool.core_rule_local_indices_by_depth[
+                depth, rule_position
+            ]
+            layout_index = pool.core_layout_indices[layout_position]
+            return depth * pool.max_n + rule_local, layout_index
+
+        def sample_auxiliary(key: Array) -> tuple[Array, Array]:
+            key_depth, key_rule, key_layout = jax.random.split(key, 3)
+            depth = jax.random.randint(
+                key_depth, (), 0, pool.num_depths, dtype=jnp.int32
+            )
+            rule_position = jax.random.randint(
+                key_rule, (), 0, pool.auxiliary_n, dtype=jnp.int32
+            )
+            layout_position = jax.random.randint(
+                key_layout, (), 0, pool.auxiliary_n, dtype=jnp.int32
+            )
+            rule_local = pool.auxiliary_rule_local_indices_by_depth[
+                depth, rule_position
+            ]
+            layout_index = pool.auxiliary_layout_indices[layout_position]
+            return depth * pool.max_n + rule_local, layout_index
+
+        return jax.lax.cond(is_auxiliary, sample_auxiliary, sample_core, key)
+
+    def _reset_one_for_bank(self, key: Array, is_auxiliary: Array):
+        key_index, key_episode = jax.random.split(key)
+        task_idx, layout_idx = self._sample_indices_for_bank(
+            key_index, is_auxiliary
+        )
+        return self._reset_one_from_indices(key_episode, task_idx, layout_idx)
+
+    @partial(jax.jit, static_argnums=(0,))
+    def reset(self, key: Array) -> tuple[Array, BatchedEnvState]:
+        keys = jax.random.split(key, self.num_envs)
+        obs, env_state = jax.vmap(self._reset_one_for_bank)(
+            keys, self.slot_is_auxiliary
+        )
+        state = BatchedEnvState(
+            env_state=env_state,
+            episode_return=jnp.zeros((self.num_envs,), dtype=jnp.float32),
+            episode_length=jnp.zeros((self.num_envs,), dtype=jnp.int32),
+        )
+        return obs, state
+
+    def _step_one_for_bank(
+        self, key: Array, state, action: Array, is_auxiliary: Array
+    ):
+        key_step, key_reset = jax.random.split(key)
+        obs, next_state, reward, done, info = self.env.step(
+            key_step, state, action
+        )
+        terminal_depth = state.depth
+
+        def reset_branch(_):
+            return self._reset_one_for_bank(key_reset, is_auxiliary)
+
+        obs, next_state = jax.lax.cond(
+            done,
+            reset_branch,
+            lambda _: (obs, next_state),
+            operand=None,
+        )
+        info = dict(info)
+        info["depth"] = terminal_depth
+        return obs, next_state, reward, done, info
+
+    @partial(jax.jit, static_argnums=(0,))
+    def step(
+        self,
+        key: Array,
+        state: BatchedEnvState,
+        actions: Array,
+    ) -> tuple[Array, BatchedEnvState, Array, Array, dict[str, Array]]:
+        keys = jax.random.split(key, self.num_envs)
+        obs, env_state, reward, done, info = jax.vmap(
+            self._step_one_for_bank
+        )(keys, state.env_state, actions, self.slot_is_auxiliary)
+        episode_return = state.episode_return + reward
+        episode_length = state.episode_length + 1
+        info = dict(info)
+        info["episode_complete"] = done
+        info["episode_return"] = jnp.where(done, episode_return, 0.0)
+        info["episode_length"] = jnp.where(done, episode_length, 0)
+        next_state = BatchedEnvState(
+            env_state=env_state,
+            episode_return=jnp.where(done, 0.0, episode_return),
+            episode_length=jnp.where(done, 0, episode_length),
+        )
+        return obs, next_state, reward, done, info
+
+
+def exhaustive_core_evaluation_indices(
+    pool: CoreAuxPoolSpec,
+) -> tuple[Array, Array, Array]:
+    """Enumerate every depth/rule/layout combination in the fixed core once."""
+
+    core_n = pool.core_n
+    depth = jnp.repeat(
+        jnp.arange(pool.num_depths, dtype=jnp.int32), core_n * core_n
+    )
+    rule_position = jnp.tile(
+        jnp.repeat(jnp.arange(core_n, dtype=jnp.int32), core_n),
+        pool.num_depths,
+    )
+    layout_position = jnp.tile(
+        jnp.arange(core_n, dtype=jnp.int32), pool.num_depths * core_n
+    )
+    rule_local = pool.core_rule_local_indices_by_depth[depth, rule_position]
+    task = depth * pool.max_n + rule_local
+    layout = pool.core_layout_indices[layout_position]
+    return task, layout, depth + 1
 
 
 def layout_auxiliaries(obstacle_masks: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

@@ -162,6 +162,96 @@ td2_run_checkpointable() {
   done
 }
 
+td2_current_requeue_target() {
+  local target=${SLURM_JOB_ID:?SLURM_JOB_ID is required for requeue}
+  if [[ -n ${SLURM_ARRAY_JOB_ID:-} && -n ${SLURM_ARRAY_TASK_ID:-} ]]; then
+    target="${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}"
+  fi
+  printf '%s\n' "$target"
+}
+
+td2_requeue_current_job() {
+  local target
+  local restart_count=${SLURM_RESTART_COUNT:-0}
+  td2_require_uint restart-count "$restart_count"
+  ((restart_count < 3000)) || td2_die \
+    "refusing to requeue after 3000 restarts"
+  target=$(td2_current_requeue_target)
+  td2_note "requeuing exact Slurm task $target"
+  scontrol requeue "$target"
+}
+
+td2_enable_transient_filesystem_requeue() {
+  # Narval occasionally allocates a node whose Lustre client has gone stale.
+  # Mirror this job's output into node-local storage so the EXIT handler can
+  # distinguish those known mount failures from real application failures.
+  : "${SLURM_JOB_ID:?SLURM_JOB_ID is required}"
+  td2_require_command scontrol
+  td2_require_command mkfifo
+  td2_require_command tee
+  local local_root=${SLURM_TMPDIR:-/tmp}
+  local local_stem="td2-fs-${SLURM_JOB_ID//[^A-Za-z0-9_.-]/_}-${SLURM_ARRAY_TASK_ID:-job}"
+  TD2_TRANSIENT_FS_LOG="$local_root/$local_stem.log"
+  TD2_TRANSIENT_FS_PIPE="$local_root/$local_stem.pipe"
+  : >"$TD2_TRANSIENT_FS_LOG"
+  rm -f -- "$TD2_TRANSIENT_FS_PIPE"
+  mkfifo "$TD2_TRANSIENT_FS_PIPE"
+  export TD2_TRANSIENT_FS_LOG TD2_TRANSIENT_FS_PIPE
+  exec 3>&1 4>&2
+  tee -a "$TD2_TRANSIENT_FS_LOG" <"$TD2_TRANSIENT_FS_PIPE" >&3 &
+  TD2_TRANSIENT_FS_TEE_PID=$!
+  export TD2_TRANSIENT_FS_TEE_PID
+  exec >"$TD2_TRANSIENT_FS_PIPE" 2>&1
+  trap 'td2_transient_filesystem_exit_handler "$?"' EXIT
+}
+
+td2_transient_filesystem_exit_handler() {
+  local status=$1
+  trap - EXIT
+  set +e
+  # Restore the original Slurm output descriptors. Closing the pipe writer
+  # lets tee flush every final error line before classification.
+  exec 1>&3 2>&4
+  if [[ -n ${TD2_TRANSIENT_FS_TEE_PID:-} ]]; then
+    wait "$TD2_TRANSIENT_FS_TEE_PID"
+  fi
+  if ((status != 0)) && [[ -f ${TD2_TRANSIENT_FS_LOG:-} ]] && grep -Eiq \
+    'No such device|Object is remote|Transport endpoint is not connected|Cannot send after transport endpoint shutdown|Stale file handle|Remote I/O error|Input/output error' \
+    "$TD2_TRANSIENT_FS_LOG"; then
+    td2_note "detected a transient shared-filesystem failure"
+    if td2_requeue_current_job; then
+      status=0
+    fi
+  fi
+  if [[ -n ${TD2_TRANSIENT_FS_LOG:-} ]]; then
+    rm -f -- "$TD2_TRANSIENT_FS_LOG"
+  fi
+  if [[ -n ${TD2_TRANSIENT_FS_PIPE:-} ]]; then
+    rm -f -- "$TD2_TRANSIENT_FS_PIPE"
+  fi
+  exit "$status"
+}
+
+td2_preflight_shared_paths_or_requeue() {
+  local path attempt ready
+  td2_require_command stat
+  for path in "$@"; do
+    ready=false
+    for attempt in 1 2 3 4 5 6; do
+      if stat -L -- "$path" >/dev/null; then
+        ready=true
+        break
+      fi
+      sleep 10
+    done
+    if [[ $ready != true ]]; then
+      td2_note "shared path remained unavailable after 60 seconds: $path"
+      td2_requeue_current_job
+      exit 0
+    fi
+  done
+}
+
 td2_accept_watchdog_exit() {
   local status=$1
   local batch_started_epoch=$2

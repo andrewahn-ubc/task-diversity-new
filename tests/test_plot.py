@@ -15,6 +15,7 @@ from td2.plot import (
     _first_crossing,
     _seed_adaptation_summaries,
     _validate_coverage,
+    create_core_aux_2b_plots,
     create_fixed_2b_fresh_plot,
     create_fixed_2b_plot,
     create_fixed_horizon_terminal_plot,
@@ -25,6 +26,7 @@ from td2.plot import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+EXPERIMENT_CONFIG = ROOT / "configs" / "experiment.yaml"
 SMOKE_CONFIG = ROOT / "configs" / "smoke.yaml"
 GPU_SMOKE_CONFIG = ROOT / "configs" / "gpu_smoke.yaml"
 FIELDS = [
@@ -556,3 +558,86 @@ def test_fixed_horizon_terminal_plot_uses_exact_1b_and_2b_roots(
             two_b_root,
             tmp_path / "bad-comparison",
         )
+
+
+def _write_core_aux_2b_fixture(
+    output_root: Path,
+    *,
+    omitted: tuple[int, int] | None = None,
+    short: tuple[int, int] | None = None,
+) -> None:
+    for width_index, width in enumerate((16, 32, 64, 128, 256)):
+        for seed in range(5):
+            if omitted == (width, seed):
+                continue
+            terminal_update = 7_619 if short == (width, seed) else 7_620
+            rows = []
+            for update, steps, base_success in (
+                (0, 0, 0.10),
+                (3_810, 999_876_864, 0.40),
+                (terminal_update, 1_999_876_864, 0.60),
+            ):
+                rows.append(
+                    _row(
+                        method="ppo_cbp",
+                        diversity_n=width,
+                        diversity_n2=width * width,
+                        seed=seed,
+                        mode="core_aux_2b_eval",
+                        distribution=1,
+                        environment_steps=steps,
+                        nominal_environment_steps=steps,
+                        success_rate=base_success + 0.02 * width_index + 0.01 * seed,
+                        global_update=update,
+                    )
+                )
+            _write_metrics(
+                output_root
+                / "core_aux_2b"
+                / "ppo_cbp"
+                / f"aux_diversity_{width * width}"
+                / f"seed_{seed}"
+                / "metrics.csv",
+                rows,
+            )
+
+
+def test_core_aux_2b_plots_require_exact_25_stream_terminal_dataset(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("matplotlib")
+    complete = tmp_path / "complete"
+    _write_core_aux_2b_fixture(complete)
+
+    outputs = create_core_aux_2b_plots(EXPERIMENT_CONFIG, complete)
+
+    assert len(outputs) == 6
+    assert all(path.is_file() and path.stat().st_size > 0 for path in outputs)
+    with outputs[2].open(encoding="utf-8", newline="") as handle:
+        learning = list(csv.DictReader(handle))
+    with outputs[5].open(encoding="utf-8", newline="") as handle:
+        terminal = list(csv.DictReader(handle))
+    assert len(learning) == 15
+    assert len(terminal) == 5
+    assert [int(row["auxiliary_diversity_n"]) for row in terminal] == [
+        16,
+        32,
+        64,
+        128,
+        256,
+    ]
+    assert all(int(row["global_update"]) == 7_620 for row in terminal)
+    assert all(int(row["num_seeds"]) == 5 for row in terminal)
+    assert [float(row["mean_core_success_rate"]) for row in terminal] == (
+        pytest.approx([0.62, 0.64, 0.66, 0.68, 0.70])
+    )
+
+    missing = tmp_path / "missing"
+    _write_core_aux_2b_fixture(missing, omitted=(256, 4))
+    with pytest.raises(PlotDataError, match="missing streams"):
+        create_core_aux_2b_plots(EXPERIMENT_CONFIG, missing)
+
+    incomplete = tmp_path / "incomplete"
+    _write_core_aux_2b_fixture(incomplete, short=(128, 3))
+    with pytest.raises(PlotDataError, match="terminal global_update"):
+        create_core_aux_2b_plots(EXPERIMENT_CONFIG, incomplete)

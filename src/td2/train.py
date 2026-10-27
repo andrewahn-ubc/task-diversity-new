@@ -26,7 +26,13 @@ from td2.checkpoint import (
     save_checkpoint,
 )
 from td2.config import RunSchedule, TD2Config, load_config
-from td2.environment import VectorBanyan, load_pool_spec
+from td2.environment import (
+    VectorBanyan,
+    VectorCoreAuxBanyan,
+    exhaustive_core_evaluation_indices,
+    load_core_aux_pool_spec,
+    load_pool_spec,
+)
 from td2.ppo import (
     RunnerState,
     balanced_evaluation_indices,
@@ -195,6 +201,14 @@ def _stream_root(
             / f"diversity_{diversity_n2}"
             / f"seed_{seed}"
         )
+    if mode == "core_aux_2b":
+        return (
+            output_root
+            / "core_aux_2b"
+            / algorithm
+            / f"aux_diversity_{diversity_n2}"
+            / f"seed_{seed}"
+        )
     if stage is None:
         raise ValueError("adaptation mode requires --stage")
     return (
@@ -273,6 +287,47 @@ def _runner_template(
     return runner, env, pool, components
 
 
+def _core_aux_environment(
+    config: TD2Config,
+    data_root: Path,
+    *,
+    auxiliary_n: int,
+    num_envs: int,
+) -> tuple[VectorCoreAuxBanyan, Any]:
+    pool = load_core_aux_pool_spec(data_root, auxiliary_n=auxiliary_n)
+    env = VectorCoreAuxBanyan(
+        pool,
+        num_envs=num_envs,
+        grid_size=6,
+        max_steps=config.ppo.max_steps,
+        include_rules_in_obs=config.ruleset.include_rules_in_obs,
+        distractor_combine_penalty=config.ruleset.distractor_combine_penalty,
+    )
+    return env, pool
+
+
+def _core_aux_runner_template(
+    config: TD2Config,
+    data_root: Path,
+    *,
+    algorithm: str,
+    auxiliary_n: int,
+    seed: int,
+) -> tuple[RunnerState, VectorCoreAuxBanyan, Any, Any]:
+    env, pool = _core_aux_environment(
+        config,
+        data_root,
+        auxiliary_n=auxiliary_n,
+        num_envs=config.ppo.num_envs,
+    )
+    components = build_components(config, env, algorithm=algorithm)
+    # Deliberately omit auxiliary diversity: every condition for one seed must
+    # start from identical parameters and differ only in the auxiliary pool.
+    key = _stable_fold(jax.random.PRNGKey(seed), 0x544432, 1)
+    runner = initialize_runner(key, config, components, env)
+    return runner, env, pool, components
+
+
 def _main_axis_steps(
     schedule: RunSchedule, *, distribution: int, update_in_phase: int
 ) -> tuple[int, int, int]:
@@ -320,7 +375,7 @@ def _metric_base(
         environment_steps = int(source_distribution) * 100_000_000
         actual_environment_steps = global_update * schedule.environment_steps_per_update
         nominal_environment_steps = environment_steps
-    elif mode.startswith("fixed"):
+    elif mode.startswith("fixed") or mode.startswith("core_aux"):
         environment_steps, actual_environment_steps = _fixed_axis_steps(
             schedule,
             update_in_phase=update_in_phase,
@@ -478,6 +533,36 @@ def _evaluation_bundle(
     )
 
 
+def _core_aux_evaluation_bundle(
+    config: TD2Config,
+    components,
+    data_root: Path,
+    *,
+    auxiliary_n: int,
+):
+    """Evaluate every depth/rule/layout combination in the fixed 16² core."""
+
+    pool = load_core_aux_pool_spec(data_root, auxiliary_n=auxiliary_n)
+    task_indices, layout_indices, depths = exhaustive_core_evaluation_indices(pool)
+    eval_episodes = int(task_indices.shape[0])
+    eval_env = VectorCoreAuxBanyan(
+        pool,
+        num_envs=eval_episodes,
+        grid_size=6,
+        max_steps=config.ppo.max_steps,
+        include_rules_in_obs=config.ruleset.include_rules_in_obs,
+        distractor_combine_penalty=config.ruleset.distractor_combine_penalty,
+    )
+    return make_evaluation_fn(
+        config,
+        components,
+        eval_env,
+        task_indices=task_indices,
+        layout_indices=layout_indices,
+        depths=depths,
+    )
+
+
 def _eval_key(
     *, seed: int, diversity_n2: int, distribution: int, update: int, heldout: bool
 ) -> jax.Array:
@@ -489,6 +574,12 @@ def _eval_key(
         update,
         int(heldout),
     )
+
+
+def _core_aux_eval_key(*, seed: int, update: int) -> jax.Array:
+    """Pair core evaluations across all auxiliary-diversity conditions."""
+
+    return _stable_fold(jax.random.PRNGKey(seed), 0x434F5245, update)
 
 
 def _checkpoint_meta(
@@ -1302,6 +1393,36 @@ def _fixed_2b_fresh_protocol_identity(
     return identity
 
 
+def _core_aux_2b_protocol_identity(
+    base_identity: Mapping[str, Any],
+    *,
+    core_n: int,
+    auxiliary_n: int,
+    target_updates: int,
+    target_optimizer_steps: int,
+    warmup_optimizer_steps: int,
+) -> dict[str, Any]:
+    """Bind checkpoints to the exact core-damage protocol and LR schedule."""
+
+    identity = dict(base_identity)
+    identity["core_aux_2b"] = {
+        "version": 1,
+        "initialization": "seeded_runner_at_distribution_1",
+        "core_n": int(core_n),
+        "auxiliary_n": int(auxiliary_n),
+        "core_transition_fraction": "1/2",
+        "auxiliary_transition_fraction": "1/2",
+        "slot_assignment": "even_core_odd_auxiliary",
+        "auxiliary_pool": "disjoint_nested_prefix",
+        "core_evaluation": "exhaustive_6_depth_x_core_rules_x_core_layouts",
+        "target_updates": int(target_updates),
+        "target_optimizer_steps": int(target_optimizer_steps),
+        "learning_rate_schedule": "warmup_cosine_from_step_0",
+        "warmup_optimizer_steps": int(warmup_optimizer_steps),
+    }
+    return identity
+
+
 def _checkpoint_sha256(checkpoint_root: Path) -> str:
     """Read and validate the content hash named by the latest pointer."""
 
@@ -1877,6 +1998,257 @@ def _run_fixed_2b_fresh(
     return True
 
 
+def _run_core_aux_2b(
+    args, config: TD2Config, auxiliary_n: int, stream_root: Path
+) -> bool:
+    """Run the clean 2B, 50/50 fixed-core/disjoint-auxiliary experiment."""
+
+    if args.algorithm != "ppo_cbp":
+        raise ValueError("core/auxiliary training requires PPO+CBP")
+    if config.network.recurrent_hidden_dim != 256:
+        raise ValueError("core/auxiliary training requires GRU width 256")
+    if config.ppo.num_envs % 2:
+        raise ValueError("core/auxiliary training requires an even NUM_ENVS")
+
+    schedule = config.derived.training_per_distribution
+    target_updates, target_optimizer_steps, warmup_optimizer_steps = (
+        _fixed_2b_schedule(config)
+    )
+    if target_updates != 7_620:
+        raise ValueError(
+            "core/auxiliary configuration must produce exactly 7,620 PPO updates"
+        )
+    base_identity = _protocol_identity(
+        config, args.data_root, expected_data_seed=args.seed
+    )
+    template, env, pool, components = _core_aux_runner_template(
+        config,
+        args.data_root,
+        algorithm=args.algorithm,
+        auxiliary_n=auxiliary_n,
+        seed=args.seed,
+    )
+    run_identity = _core_aux_2b_protocol_identity(
+        base_identity,
+        core_n=pool.core_n,
+        auxiliary_n=auxiliary_n,
+        target_updates=target_updates,
+        target_optimizer_steps=target_optimizer_steps,
+        warmup_optimizer_steps=warmup_optimizer_steps,
+    )
+
+    resume_root = stream_root / "resume"
+    if (resume_root / "latest.json").exists() or (
+        resume_root / "previous.json"
+    ).exists():
+        runner, metadata = load_checkpoint_with_metadata(resume_root, template)
+        _validate_identity(
+            metadata,
+            mode="core_aux_2b",
+            algorithm=args.algorithm,
+            diversity_n=auxiliary_n,
+            seed=args.seed,
+            protocol_identity=run_identity,
+        )
+        _validate_checkpoint_counters(metadata, runner)
+        if int(metadata.get("distribution", -1)) != 1 or int(
+            metadata.get("source_distribution", -1)
+        ) != 1:
+            raise CheckpointError("core/auxiliary checkpoint distribution mismatch")
+    else:
+        runner = template
+
+    update_in_phase = _as_int(runner.update_in_phase)
+    global_update = _as_int(runner.global_update)
+    optimizer_steps = _as_int(runner.learner.optimizer_steps)
+    schedule_step = _as_int(runner.learner.schedule_step)
+    expected_optimizer_steps = (
+        update_in_phase * schedule.optimizer_steps_per_update
+    )
+    if not 0 <= update_in_phase <= target_updates:
+        raise CheckpointError(
+            "core/auxiliary update counter is outside its valid range"
+        )
+    if global_update != update_in_phase:
+        raise CheckpointError("core/auxiliary update counters diverged")
+    if optimizer_steps != expected_optimizer_steps or schedule_step != optimizer_steps:
+        raise CheckpointError(
+            "core/auxiliary optimizer counters do not match its update counter"
+        )
+
+    metrics_path = stream_root / "metrics.csv"
+    evaluation_interval = max(
+        1, round(10_000_000 / schedule.environment_steps_per_update)
+    )
+    update_fn = make_update_fn(
+        config,
+        components,
+        env,
+        total_optimizer_steps=target_optimizer_steps,
+        warmup_optimizer_steps=warmup_optimizer_steps,
+    )
+    evaluate = (
+        None
+        if config.profiling.disable_evaluation
+        else _core_aux_evaluation_bundle(
+            config,
+            components,
+            args.data_root,
+            auxiliary_n=auxiliary_n,
+        )
+    )
+    started = time.monotonic()
+    last_checkpoint = started
+    recent_durations: list[float] = []
+
+    if evaluate is not None and update_in_phase == 0:
+        evaluation = evaluate(
+            runner.learner.params,
+            _core_aux_eval_key(seed=args.seed, update=0),
+        )
+        jax.block_until_ready(evaluation)
+        _write_evaluation_metric(
+            metrics_path,
+            evaluation,
+            algorithm=args.algorithm,
+            diversity_n=auxiliary_n,
+            seed=args.seed,
+            mode="core_aux_2b_eval",
+            distribution=1,
+            runner=runner,
+            schedule=schedule,
+            source_distribution=1,
+        )
+
+    while _as_int(runner.update_in_phase) < target_updates:
+        update_started = time.monotonic()
+        runner, metrics = update_fn(runner)
+        jax.block_until_ready(runner)
+        duration = time.monotonic() - update_started
+        recent_durations = (recent_durations + [duration])[-5:]
+        _write_training_metric(
+            metrics_path,
+            metrics,
+            algorithm=args.algorithm,
+            diversity_n=auxiliary_n,
+            seed=args.seed,
+            mode="core_aux_2b_train",
+            distribution=1,
+            runner=runner,
+            schedule=schedule,
+            source_distribution=1,
+        )
+
+        update_in_phase = _as_int(runner.update_in_phase)
+        if evaluate is not None and update_in_phase % evaluation_interval == 0:
+            evaluation = evaluate(
+                runner.learner.params,
+                _core_aux_eval_key(seed=args.seed, update=update_in_phase),
+            )
+            jax.block_until_ready(evaluation)
+            _write_evaluation_metric(
+                metrics_path,
+                evaluation,
+                algorithm=args.algorithm,
+                diversity_n=auxiliary_n,
+                seed=args.seed,
+                mode="core_aux_2b_eval",
+                distribution=1,
+                runner=runner,
+                schedule=schedule,
+                source_distribution=1,
+            )
+
+        now = time.monotonic()
+        if now - last_checkpoint >= args.checkpoint_interval_seconds:
+            _save_resume(
+                stream_root,
+                runner,
+                mode="core_aux_2b",
+                algorithm=args.algorithm,
+                diversity_n=auxiliary_n,
+                seed=args.seed,
+                distribution=1,
+                protocol_identity=run_identity,
+                source_distribution=1,
+            )
+            last_checkpoint = now
+        predicted = max(recent_durations, default=60.0) * 1.25 + 120.0
+        if (
+            _STOP_REQUESTED
+            or now - started + predicted >= args.soft_time_limit_seconds
+            or (args.max_updates is not None and update_in_phase >= args.max_updates)
+        ):
+            _save_resume(
+                stream_root,
+                runner,
+                mode="core_aux_2b",
+                algorithm=args.algorithm,
+                diversity_n=auxiliary_n,
+                seed=args.seed,
+                distribution=1,
+                protocol_identity=run_identity,
+                source_distribution=1,
+            )
+            return False
+
+    if evaluate is not None:
+        evaluation = evaluate(
+            runner.learner.params,
+            _core_aux_eval_key(
+                seed=args.seed, update=_as_int(runner.update_in_phase)
+            ),
+        )
+        jax.block_until_ready(evaluation)
+        _write_evaluation_metric(
+            metrics_path,
+            evaluation,
+            algorithm=args.algorithm,
+            diversity_n=auxiliary_n,
+            seed=args.seed,
+            mode="core_aux_2b_eval",
+            distribution=1,
+            runner=runner,
+            schedule=schedule,
+            source_distribution=1,
+        )
+
+    expected_final_counters = {
+        "update_in_phase": target_updates,
+        "global_update": target_updates,
+        "optimizer_steps": target_optimizer_steps,
+        "schedule_step": target_optimizer_steps,
+    }
+    _require_exact_runner_counters(
+        runner,
+        expected=expected_final_counters,
+        label="core/auxiliary 2B final checkpoint",
+    )
+    _save_resume(
+        stream_root,
+        runner,
+        mode="core_aux_2b",
+        algorithm=args.algorithm,
+        diversity_n=auxiliary_n,
+        seed=args.seed,
+        distribution=1,
+        protocol_identity=run_identity,
+        source_distribution=1,
+    )
+    metadata = _checkpoint_meta(
+        mode="core_aux_2b",
+        algorithm=args.algorithm,
+        diversity_n=auxiliary_n,
+        seed=args.seed,
+        distribution=1,
+        runner=runner,
+        protocol_identity=run_identity,
+        source_distribution=1,
+    )
+    atomic_marker(stream_root / "DONE", metadata)
+    return True
+
+
 def _run_adapt(args, config: TD2Config, diversity_n: int, stream_root: Path) -> bool:
     assert args.stage is not None
     protocol_identity = _protocol_identity(
@@ -2128,7 +2500,14 @@ def _parse_args(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--mode",
-        choices=("main", "fixed", "fixed_2b", "fixed_2b_fresh", "adapt"),
+        choices=(
+            "main",
+            "fixed",
+            "fixed_2b",
+            "fixed_2b_fresh",
+            "core_aux_2b",
+            "adapt",
+        ),
         required=True,
     )
     parser.add_argument("--config", type=Path, required=True)
@@ -2208,6 +2587,8 @@ def main(argv: list[str] | None = None) -> int:
         completed = _run_fixed_2b(args, config, diversity_n, stream_root)
     elif args.mode == "fixed_2b_fresh":
         completed = _run_fixed_2b_fresh(args, config, diversity_n, stream_root)
+    elif args.mode == "core_aux_2b":
+        completed = _run_core_aux_2b(args, config, diversity_n, stream_root)
     else:
         completed = _run_adapt(args, config, diversity_n, stream_root)
     print(

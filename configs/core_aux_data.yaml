@@ -1,0 +1,5 @@
+extends: core_aux_2b.yaml
+
+# Kept as a distinct config identity so the submission receipt binds data
+# generation separately from training.  td2.core_aux_data reads the common
+# seed/ruleset settings and generates exactly one width-272 bank per seed.

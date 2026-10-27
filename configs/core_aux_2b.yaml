@@ -1,0 +1,34 @@
+extends: experiment.yaml
+
+# Core-damage experiment: train from initialization for a clean two-billion-
+# step schedule while exactly half of every PPO batch comes from a fixed 16^2
+# core and half from a disjoint auxiliary pool.  The values below name the
+# auxiliary pool sizes; the core is encoded in the immutable data manifest.
+experiment:
+  num_distributions: 10
+  diversity_levels: [256, 1024, 4096, 16384, 65536]
+  methods: [ppo_cbp]
+  ambiguity_resolution: >-
+    Use GRU width 256 and PPO plus Continual Backpropagation. Train every
+    stream for a clean two-billion-step learning-rate schedule with exactly
+    half of vector slots assigned to the fixed 16^2 core and half assigned to
+    a disjoint auxiliary pool of width 16, 32, 64, 128, or 256. Auxiliary
+    pools are nested within seed, and evaluation exhaustively covers only the
+    fixed 16^2 core.
+  adaptation:
+    enabled: false
+    after_distributions: []
+
+derived_expectations:
+  updates_per_distribution: 381
+  optimizer_steps_per_distribution: 3048
+  warmup_optimizer_steps_per_distribution: 152
+  consumed_timesteps_per_distribution: 99876864
+  timestep_remainder_per_distribution: 123136
+  total_training_updates_per_stream: 3810
+  total_training_optimizer_steps_per_stream: 30480
+  total_training_warmup_optimizer_steps_per_stream: 1520
+  adaptation_probe_count: 0
+  updates_per_adaptation_probe: 0
+  optimizer_steps_per_adaptation_probe: 0
+  warmup_optimizer_steps_per_adaptation_probe: 0

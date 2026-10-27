@@ -23,6 +23,11 @@ from td2.config import TD2Config, load_config
 
 REQUIRED_ID_COLUMNS = ("method", "seed", "mode", "distribution")
 DEFAULT_THRESHOLD = 0.80
+CORE_AUX_METHOD = "ppo_cbp"
+CORE_AUX_EVAL_MODE = "core_aux_2b_eval"
+CORE_AUX_WIDTHS = (16, 32, 64, 128, 256)
+CORE_AUX_SEEDS = tuple(range(5))
+CORE_AUX_TERMINAL_UPDATE = 7_620
 
 
 class PlotDataError(RuntimeError):
@@ -1086,6 +1091,311 @@ def create_fixed_horizon_terminal_plot(
     ]
 
 
+def _core_aux_expected_source(width: int, seed: int) -> str:
+    return (
+        "core_aux_2b/ppo_cbp/"
+        f"aux_diversity_{width * width}/seed_{seed}/metrics.csv"
+    )
+
+
+def _validate_core_aux_2b_rows(
+    rows: Sequence[MetricRow], config: TD2Config
+) -> None:
+    """Require all 25 exact core/aux streams at their 2B checkpoint."""
+
+    if config.network.recurrent_hidden_dim != 256:
+        raise PlotDataError("core/aux 2B plots require a configured GRU width of 256")
+
+    expected = {
+        (CORE_AUX_METHOD, width, seed)
+        for width in CORE_AUX_WIDTHS
+        for seed in CORE_AUX_SEEDS
+    }
+    actual = {(row.method, row.diversity_n, row.seed) for row in rows}
+    missing = sorted(expected - actual)
+    if missing:
+        preview = ", ".join(
+            f"{method}/aux-n={width}/seed={seed}"
+            for method, width, seed in missing[:8]
+        )
+        suffix = " ..." if len(missing) > 8 else ""
+        raise PlotDataError(
+            "core_aux_2b_eval metrics are incomplete "
+            f"({len(missing)} missing streams): {preview}{suffix}"
+        )
+    unexpected = sorted(actual - expected)
+    if unexpected:
+        preview = ", ".join(
+            f"{method}/aux-n={width}/seed={seed}"
+            for method, width, seed in unexpected[:8]
+        )
+        suffix = " ..." if len(unexpected) > 8 else ""
+        raise PlotDataError(
+            "core_aux_2b_eval metrics contain "
+            f"{len(unexpected)} unexpected streams: {preview}{suffix}"
+        )
+
+    invalid_rows = [
+        row
+        for row in rows
+        if row.mode != CORE_AUX_EVAL_MODE
+        or row.distribution != 1
+        or row.diversity_n2 != row.diversity_n * row.diversity_n
+        or row.source != _core_aux_expected_source(row.diversity_n, row.seed)
+    ]
+    if invalid_rows:
+        row = invalid_rows[0]
+        raise PlotDataError(
+            "core_aux_2b_eval row violates the expected stream layout or identity: "
+            f"{row.source}"
+        )
+
+    terminal_updates: dict[tuple[int, int], int] = {}
+    for row in rows:
+        key = (row.diversity_n, row.seed)
+        terminal_updates[key] = max(
+            terminal_updates.get(key, -1), row.global_update
+        )
+    wrong = sorted(
+        (width, seed, update)
+        for (width, seed), update in terminal_updates.items()
+        if update != CORE_AUX_TERMINAL_UPDATE
+    )
+    if wrong:
+        preview = ", ".join(
+            f"aux-n={width}/seed={seed}: {update}"
+            for width, seed, update in wrong[:8]
+        )
+        suffix = " ..." if len(wrong) > 8 else ""
+        raise PlotDataError(
+            "core_aux_2b_eval metrics have incorrect terminal global_update "
+            f"(expected {CORE_AUX_TERMINAL_UPDATE}): {preview}{suffix}"
+        )
+
+
+def _core_aux_learning_summary(
+    rows: Sequence[MetricRow], config: TD2Config
+) -> list[dict[str, Any]]:
+    by_stream: dict[tuple[int, int], dict[int, MetricRow]] = {}
+    for row in rows:
+        if row.global_update < 0 or not math.isfinite(row.success_rate):
+            continue
+        by_stream.setdefault((row.diversity_n, row.seed), {})[
+            row.global_update
+        ] = row
+
+    reference_updates: tuple[int, ...] | None = None
+    for key in sorted(by_stream):
+        updates = tuple(sorted(by_stream[key]))
+        if reference_updates is None:
+            reference_updates = updates
+        elif updates != reference_updates:
+            raise PlotDataError(
+                "core_aux_2b_eval streams do not share one evaluation-update grid; "
+                f"first mismatch is aux-n={key[0]}/seed={key[1]}"
+            )
+    if not reference_updates:
+        raise PlotDataError("core_aux_2b_eval metrics contain no finite trajectory")
+
+    summary: list[dict[str, Any]] = []
+    for width in CORE_AUX_WIDTHS:
+        for update in reference_updates:
+            point_rows = [
+                by_stream[(width, seed)][update] for seed in CORE_AUX_SEEDS
+            ]
+            steps = np.asarray(
+                [_global_step(row, config) for row in point_rows], dtype=float
+            )
+            if not np.all(np.isfinite(steps)) or not np.allclose(
+                steps, steps[0], rtol=0.0, atol=0.5
+            ):
+                raise PlotDataError(
+                    "core_aux_2b_eval streams disagree on environment steps at "
+                    f"aux-n={width}, global_update={update}"
+                )
+            mean, sem, count = _mean_sem(
+                [row.success_rate for row in point_rows]
+            )
+            summary.append(
+                {
+                    "auxiliary_diversity_n": width,
+                    "auxiliary_diversity_n2": width * width,
+                    "global_update": update,
+                    "nominal_environment_steps": float(steps[0]),
+                    "mean_core_success_rate": mean,
+                    "sem_core_success_rate": sem,
+                    "num_seeds": count,
+                }
+            )
+    return summary
+
+
+def _write_csv_rows(
+    destination: Path,
+    *,
+    fields: Sequence[str],
+    rows: Sequence[Mapping[str, Any]],
+) -> None:
+    temporary = destination.with_name(
+        f"{destination.stem}.tmp{destination.suffix}"
+    )
+    with temporary.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, destination)
+
+
+def create_core_aux_2b_plots(
+    config_path: str | Path,
+    output_root: str | Path,
+) -> list[Path]:
+    """Plot core retention while varying a disjoint auxiliary-task pool."""
+
+    config = load_config(config_path)
+    rows = [
+        row
+        for row in read_metric_rows(output_root)
+        if row.mode == CORE_AUX_EVAL_MODE and math.isfinite(row.success_rate)
+    ]
+    _validate_core_aux_2b_rows(rows, config)
+    learning = _core_aux_learning_summary(rows, config)
+
+    plot_dir = Path(output_root).expanduser().resolve() / "plots"
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    learning_destination = plot_dir / "core_aux_2b_core_evaluation_success"
+    terminal_destination = plot_dir / "core_aux_2b_terminal_core_success"
+
+    import matplotlib.pyplot as plt
+
+    colors = {
+        width: color
+        for width, color in zip(
+            CORE_AUX_WIDTHS,
+            plt.get_cmap("viridis")(np.linspace(0.05, 0.95, len(CORE_AUX_WIDTHS))),
+        )
+    }
+    figure, axis = plt.subplots(figsize=(10.2, 5.2), constrained_layout=True)
+    for width in CORE_AUX_WIDTHS:
+        points = [
+            row for row in learning if row["auxiliary_diversity_n"] == width
+        ]
+        x = np.asarray(
+            [row["nominal_environment_steps"] for row in points], dtype=float
+        ) / 1e6
+        mean = np.asarray(
+            [row["mean_core_success_rate"] for row in points], dtype=float
+        )
+        sem = np.asarray(
+            [row["sem_core_success_rate"] for row in points], dtype=float
+        )
+        axis.plot(
+            x,
+            mean,
+            color=colors[width],
+            linewidth=1.9,
+            label=f"Auxiliary {width}²",
+        )
+        axis.fill_between(
+            x,
+            mean - sem,
+            mean + sem,
+            color=colors[width],
+            alpha=0.16,
+            linewidth=0,
+        )
+    axis.set(
+        xlabel="Core–auxiliary training environment steps (millions)",
+        ylabel="Core evaluation success rate",
+        title="Core evaluation during 50/50 core–auxiliary training",
+        ylim=(-0.02, 1.02),
+    )
+    axis.grid(axis="y", alpha=0.20)
+    axis.legend(ncol=3, fontsize=8, frameon=False)
+    for suffix in (".png", ".pdf"):
+        _atomic_save_figure(figure, learning_destination.with_suffix(suffix))
+    plt.close(figure)
+
+    terminal = [
+        row for row in learning if row["global_update"] == CORE_AUX_TERMINAL_UPDATE
+    ]
+    if len(terminal) != len(CORE_AUX_WIDTHS):
+        raise PlotDataError("core/aux terminal summary is incomplete")
+    x = np.asarray(
+        [row["auxiliary_diversity_n2"] for row in terminal], dtype=float
+    )
+    mean = np.asarray(
+        [row["mean_core_success_rate"] for row in terminal], dtype=float
+    )
+    sem = np.asarray(
+        [row["sem_core_success_rate"] for row in terminal], dtype=float
+    )
+    figure, axis = plt.subplots(figsize=(9.2, 5.2), constrained_layout=True)
+    axis.errorbar(
+        x,
+        mean,
+        yerr=sem,
+        color=plt.get_cmap("viridis")(0.42),
+        marker="o",
+        markersize=5,
+        linewidth=2,
+        capsize=3,
+    )
+    levels = tuple(width * width for width in CORE_AUX_WIDTHS)
+    axis.set_xscale("log", base=4)
+    axis.set_xticks(levels)
+    axis.set_xticklabels([f"{width}²" for width in CORE_AUX_WIDTHS])
+    axis.set(
+        xlabel="Auxiliary-task diversity (number of tasks; log₄ scale)",
+        ylabel="Core evaluation success rate at 2B steps",
+        title="Terminal core performance versus auxiliary-task diversity",
+        ylim=(-0.02, 1.02),
+    )
+    axis.grid(axis="y", alpha=0.20)
+    for suffix in (".png", ".pdf"):
+        _atomic_save_figure(figure, terminal_destination.with_suffix(suffix))
+    plt.close(figure)
+
+    learning_csv = learning_destination.with_suffix(".csv")
+    _write_csv_rows(
+        learning_csv,
+        fields=(
+            "auxiliary_diversity_n",
+            "auxiliary_diversity_n2",
+            "global_update",
+            "nominal_environment_steps",
+            "mean_core_success_rate",
+            "sem_core_success_rate",
+            "num_seeds",
+        ),
+        rows=learning,
+    )
+    terminal_csv = terminal_destination.with_suffix(".csv")
+    _write_csv_rows(
+        terminal_csv,
+        fields=(
+            "auxiliary_diversity_n",
+            "auxiliary_diversity_n2",
+            "global_update",
+            "nominal_environment_steps",
+            "mean_core_success_rate",
+            "sem_core_success_rate",
+            "num_seeds",
+        ),
+        rows=terminal,
+    )
+    return [
+        learning_destination.with_suffix(".png"),
+        learning_destination.with_suffix(".pdf"),
+        learning_csv,
+        terminal_destination.with_suffix(".png"),
+        terminal_destination.with_suffix(".pdf"),
+        terminal_csv,
+    ]
+
+
 def create_plots(
     config_path: str | Path,
     output_root: str | Path,
@@ -1204,6 +1514,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="compare terminal GRU-256 performance after independent 1B and 2B runs",
     )
     parser.add_argument(
+        "--core-aux-2b-only",
+        action="store_true",
+        help=(
+            "write only the core-evaluation learning curve and terminal "
+            "core-versus-auxiliary-diversity plot"
+        ),
+    )
+    parser.add_argument(
         "--fixed-1b-root",
         type=Path,
         help="completed original GRU-256 fixed-distribution 1B result root",
@@ -1227,6 +1545,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.fixed_2b_fresh_only,
             args.gru_width_comparison,
             args.fixed_horizon_comparison,
+            args.core_aux_2b_only,
         )
     )
     if modes > 1:
@@ -1238,7 +1557,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             "--fixed-1b-root and --fixed-2b-root require "
             "--fixed-horizon-comparison"
         )
-    if args.fixed_horizon_comparison:
+    if args.core_aux_2b_only:
+        if args.source_output_root is not None or args.gru_width_run:
+            raise SystemExit(
+                "core/aux plotting does not use --source-output-root "
+                "or --gru-width-run"
+            )
+        outputs = create_core_aux_2b_plots(args.config, args.output_root)
+    elif args.fixed_horizon_comparison:
         if args.source_output_root is not None or args.gru_width_run:
             raise SystemExit(
                 "fixed-horizon comparison does not use --source-output-root "

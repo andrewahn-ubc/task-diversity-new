@@ -137,6 +137,37 @@ mean/SEM table under
 The two lines are separate experiments with their respective 1B and clean 2B
 learning-rate schedules; the 2B line is not the older 1B-to-2B extension.
 
+### Run the 16²-core damage experiment
+
+This experiment tests whether progressively larger, disjoint auxiliary pools
+damage performance on a fixed core. It uses PPO+CBP with GRU width 256 and
+trains 25 clean 2B streams: five seeds at auxiliary diversities `16²`, `32²`,
+`64²`, `128²`, and `256²`. Exactly half of every PPO rollout comes from the
+same seed-specific `16²` core and half from the selected auxiliary pool. The
+auxiliary pools are disjoint from the core and nested within a seed.
+
+Once the existing `/scratch/taegyoem/td2-runtime` setup is available, submit
+the complete data, validation, training, and plotting chain with one command:
+
+```bash
+bash scripts/submit_core_aux_2b.sh
+```
+
+Every job uses `def-krallen`. The launcher creates fresh data under
+`/scratch/taegyoem/td2-data-core-aux-16sq-50-50-seeded` and results under
+`/scratch/taegyoem/td2-results-core-aux-16sq-50-50-gru256-2b`; it does not
+modify any earlier task bank or result. If the chain is cancelled, wait until
+its prior `td2-*` jobs have stopped and run:
+
+```bash
+bash scripts/submit_core_aux_2b.sh --resume
+```
+
+Core evaluation is exhaustive: every combination of six depths, 16 core rule
+trees, and 16 core layouts is evaluated once (1,536 episodes) at each probe.
+The aggregate job writes the core learning curve and terminal core performance
+versus auxiliary diversity as PNG, PDF, and CSV files under `plots/`.
+
 Do not run the setup command on a compute node. It downloads wheels and exact
 dependency revisions once on the login node; all scheduled jobs then run
 offline. Binary dependencies are installed as non-editable snapshots, while

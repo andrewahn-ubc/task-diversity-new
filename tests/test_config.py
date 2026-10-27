@@ -10,7 +10,12 @@ import yaml
 
 from td2.config import ConfigurationError, load_config
 from td2.ppo import scheduled_learning_rate
-from td2.train import _fixed_2b_schedule, _fixed_axis_steps
+from td2.train import (
+    _core_aux_2b_protocol_identity,
+    _fixed_2b_schedule,
+    _fixed_axis_steps,
+    _stream_root,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,6 +24,7 @@ GRU512_CONFIG = ROOT / "configs" / "experiment_gru512.yaml"
 GRU1024_CONFIG = ROOT / "configs" / "experiment_gru1024.yaml"
 SMOKE_CONFIG = ROOT / "configs" / "smoke.yaml"
 SOURCE_CONFIG = ROOT / "configs" / "source_hyperparameters.yaml"
+CORE_AUX_CONFIG = ROOT / "configs" / "core_aux_2b.yaml"
 
 
 def test_scientific_notation_strings_are_normalized_to_integers() -> None:
@@ -154,6 +160,48 @@ def test_fixed_branch_uses_the_shared_prefix_and_nominal_one_billion_axis() -> N
     assert float(
         scheduled_learning_rate(jnp.asarray(target_optimizer_steps), **lr_kwargs)
     ) == 0.0
+
+
+def test_core_aux_config_and_checkpoint_identity_are_exact() -> None:
+    config = load_config(CORE_AUX_CONFIG)
+    assert config.network.recurrent_hidden_dim == 256
+    assert config.experiment.methods == ("ppo_cbp",)
+    assert config.experiment.diversity_levels == (
+        256,
+        1_024,
+        4_096,
+        16_384,
+        65_536,
+    )
+    assert config.experiment.adaptation.enabled is False
+    assert config.derived.adaptation_probe_count == 0
+    assert _fixed_2b_schedule(config) == (7_620, 60_960, 3_048)
+
+    root = _stream_root(
+        Path("/results"),
+        mode="core_aux_2b",
+        algorithm="ppo_cbp",
+        diversity_n2=65_536,
+        seed=4,
+        stage=None,
+    )
+    assert root == Path(
+        "/results/core_aux_2b/ppo_cbp/aux_diversity_65536/seed_4"
+    )
+
+    identity = _core_aux_2b_protocol_identity(
+        {"data_manifest_sha256": "abc"},
+        core_n=16,
+        auxiliary_n=256,
+        target_updates=7_620,
+        target_optimizer_steps=60_960,
+        warmup_optimizer_steps=3_048,
+    )
+    protocol = identity["core_aux_2b"]
+    assert protocol["core_n"] == 16
+    assert protocol["auxiliary_n"] == 256
+    assert protocol["core_transition_fraction"] == "1/2"
+    assert protocol["target_updates"] == 7_620
 
 
 def test_config_and_nested_values_are_immutable() -> None:
