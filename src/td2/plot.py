@@ -28,6 +28,15 @@ CORE_AUX_EVAL_MODE = "core_aux_2b_eval"
 CORE_AUX_WIDTHS = (16, 32, 64, 128, 256)
 CORE_AUX_SEEDS = tuple(range(5))
 CORE_AUX_TERMINAL_UPDATE = 7_620
+FIXED_ADAPT_EVAL_MODE = "adapt_fixed_eval"
+FIXED_FINAL_ADAPT_CONDITIONS = frozenset(
+    {
+        (1, 256),
+        (2, 256),
+        (2, 512),
+        (2, 1024),
+    }
+)
 
 
 class PlotDataError(RuntimeError):
@@ -157,7 +166,7 @@ def read_metric_rows(output_root: str | Path) -> list[MetricRow]:
     # runs remain independent because seed/method/diversity are part of the key.
     deduplicated: dict[tuple[Any, ...], MetricRow] = {}
     for row in rows:
-        x = row.adaptation_steps if row.mode == "adapt" else (
+        x = row.adaptation_steps if row.mode.startswith("adapt") else (
             row.nominal_environment_steps
             if math.isfinite(row.nominal_environment_steps)
             else row.environment_steps
@@ -1091,6 +1100,420 @@ def create_fixed_horizon_terminal_plot(
     ]
 
 
+def _read_fixed_final_adaptation_condition(
+    run_root: str | Path,
+    config: TD2Config,
+    *,
+    condition: tuple[int, int],
+) -> tuple[list[MetricRow], int]:
+    """Read one condition without merging it with another horizon or width."""
+
+    horizon, gru_width = condition
+    rows = [
+        row
+        for row in read_metric_rows(run_root)
+        if row.mode == FIXED_ADAPT_EVAL_MODE
+        and math.isfinite(row.adaptation_steps)
+        and math.isfinite(row.success_rate)
+    ]
+    label = f"{horizon}B/GRU-{gru_width}"
+    if not rows:
+        raise PlotDataError(f"{label} has no {FIXED_ADAPT_EVAL_MODE} metrics")
+
+    wrong_context = [
+        row
+        for row in rows
+        if row.distribution != 1 or row.source_distribution != 1
+    ]
+    if wrong_context:
+        raise PlotDataError(
+            f"{label} contains fixed-final adaptation rows from a source "
+            "other than distribution 1"
+        )
+
+    expected = {
+        (method, width, seed)
+        for method in config.experiment.methods
+        for width in _expected_widths(config)
+        for seed in config.runtime.seeds
+    }
+    actual = {(row.method, row.diversity_n, row.seed) for row in rows}
+    missing = sorted(expected - actual)
+    unexpected = sorted(actual - expected)
+    if missing:
+        preview = ", ".join(
+            f"{method}/n={width}/seed={seed}"
+            for method, width, seed in missing[:8]
+        )
+        suffix = " ..." if len(missing) > 8 else ""
+        raise PlotDataError(
+            f"{label} adaptation metrics are incomplete "
+            f"({len(missing)} missing streams): {preview}{suffix}"
+        )
+    if unexpected:
+        preview = ", ".join(
+            f"{method}/n={width}/seed={seed}"
+            for method, width, seed in unexpected[:8]
+        )
+        suffix = " ..." if len(unexpected) > 8 else ""
+        raise PlotDataError(
+            f"{label} adaptation metrics contain {len(unexpected)} "
+            f"unexpected streams: {preview}{suffix}"
+        )
+
+    steps_by_stream: dict[tuple[str, int, int], set[int]] = {}
+    for row in rows:
+        steps_by_stream.setdefault(
+            (row.method, row.diversity_n, row.seed), set()
+        ).add(int(row.adaptation_steps))
+    reference_key = min(expected)
+    reference_steps = steps_by_stream[reference_key]
+    mismatched_grids = sorted(
+        key for key in expected if steps_by_stream[key] != reference_steps
+    )
+    if mismatched_grids:
+        preview = ", ".join(
+            f"{method}/n={width}/seed={seed}"
+            for method, width, seed in mismatched_grids[:8]
+        )
+        suffix = " ..." if len(mismatched_grids) > 8 else ""
+        raise PlotDataError(
+            f"{label} adaptation streams do not share one complete "
+            f"evaluation-step grid: {preview}{suffix}"
+        )
+
+    schedule = config.derived.adaptation_per_probe
+    if schedule is None:
+        raise PlotDataError("fixed-final adaptation plotting requires adaptation")
+    target = int(schedule.consumed_timesteps)
+    terminal_steps: dict[tuple[str, int, int], int] = {}
+    for row in rows:
+        key = (row.method, row.diversity_n, row.seed)
+        terminal_steps[key] = max(
+            terminal_steps.get(key, -1), int(row.adaptation_steps)
+        )
+    wrong = sorted(
+        (*key, step)
+        for key, step in terminal_steps.items()
+        if step != target
+    )
+    if wrong:
+        preview = ", ".join(
+            f"{method}/n={width}/seed={seed}: {step}"
+            for method, width, seed, step in wrong[:8]
+        )
+        suffix = " ..." if len(wrong) > 8 else ""
+        raise PlotDataError(
+            f"{label} has an incorrect terminal adaptation step "
+            f"(expected {target}): {preview}{suffix}"
+        )
+    return rows, target
+
+
+def _fixed_final_adaptation_summary_rows(
+    condition_rows: Mapping[tuple[int, int], Sequence[MetricRow]],
+    condition_roots: Mapping[tuple[int, int], str | Path],
+    *,
+    target: int,
+) -> list[dict[str, Any]]:
+    """Aggregate every evaluation point while keeping conditions separate."""
+
+    summaries: list[dict[str, Any]] = []
+    for (horizon, gru_width), rows in sorted(condition_rows.items()):
+        points: dict[tuple[int, int], dict[int, float]] = {}
+        for row in rows:
+            step = int(row.adaptation_steps)
+            points.setdefault((row.diversity_n, step), {})[row.seed] = float(
+                row.success_rate
+            )
+        for (diversity_n, step), seed_values in sorted(points.items()):
+            mean, sem, count = _mean_sem(list(seed_values.values()))
+            summaries.append(
+                {
+                    "training_steps_billions": horizon,
+                    "gru_hidden_dim": gru_width,
+                    "diversity_n": diversity_n,
+                    "diversity_n2": diversity_n * diversity_n,
+                    "adaptation_steps": step,
+                    "adaptation_steps_millions": step / 1e6,
+                    "mean_success_rate": mean,
+                    "sem_success_rate": sem,
+                    "num_seeds": count,
+                    "is_terminal": int(step == target),
+                    "source_root": str(
+                        Path(condition_roots[(horizon, gru_width)])
+                        .expanduser()
+                        .resolve()
+                    ),
+                }
+            )
+    return summaries
+
+
+def _write_fixed_final_adaptation_summary(
+    summaries: Sequence[Mapping[str, Any]], destination: Path
+) -> None:
+    fields = [
+        "training_steps_billions",
+        "gru_hidden_dim",
+        "diversity_n",
+        "diversity_n2",
+        "adaptation_steps",
+        "adaptation_steps_millions",
+        "mean_success_rate",
+        "sem_success_rate",
+        "num_seeds",
+        "is_terminal",
+        "source_root",
+    ]
+    temporary = destination.with_name(f"{destination.stem}.tmp{destination.suffix}")
+    with temporary.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(summaries)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, destination)
+
+
+def _fixed_final_terminal_plot(
+    summaries: Sequence[Mapping[str, Any]],
+    *,
+    series: Sequence[tuple[tuple[int, int], str]],
+    expected_levels: Sequence[int],
+    destination: Path,
+    title: str,
+) -> None:
+    import matplotlib.pyplot as plt
+
+    terminal = {
+        (
+            int(row["training_steps_billions"]),
+            int(row["gru_hidden_dim"]),
+            int(row["diversity_n2"]),
+        ): row
+        for row in summaries
+        if int(row["is_terminal"]) == 1
+    }
+    colors = plt.get_cmap("viridis")(
+        np.linspace(0.12, 0.88, max(1, len(series)))
+    )
+    figure, axis = plt.subplots(figsize=(9.2, 5.2), constrained_layout=True)
+    for color, ((horizon, gru_width), label) in zip(colors, series):
+        curve = [terminal[(horizon, gru_width, level)] for level in expected_levels]
+        axis.errorbar(
+            np.asarray(expected_levels, dtype=float),
+            np.asarray([float(row["mean_success_rate"]) for row in curve]),
+            yerr=np.asarray([float(row["sem_success_rate"]) for row in curve]),
+            color=color,
+            marker="o",
+            markersize=5,
+            linewidth=2,
+            capsize=3,
+            label=label,
+        )
+    axis.set_xscale("log", base=4)
+    axis.set_xticks(expected_levels)
+    axis.set_xticklabels([f"{math.isqrt(level)}²" for level in expected_levels])
+    axis.set(
+        xlabel="Training-task diversity (number of tasks; log₄ scale)",
+        ylabel="Held-out success rate after 100M adaptation steps",
+        title=title,
+        ylim=(-0.02, 1.02),
+    )
+    axis.grid(axis="y", alpha=0.20)
+    axis.legend(frameon=False)
+    for suffix in (".png", ".pdf"):
+        _atomic_save_figure(figure, destination.with_suffix(suffix))
+    plt.close(figure)
+
+
+def _fixed_final_adaptation_curve_panels(
+    summaries: Sequence[Mapping[str, Any]],
+    *,
+    panels: Sequence[tuple[tuple[int, int], str]],
+    expected_levels: Sequence[int],
+    destination: Path,
+    title: str,
+) -> None:
+    import matplotlib.pyplot as plt
+
+    colors, _ = _style(
+        [math.isqrt(level) for level in expected_levels], ["ppo_cbp"]
+    )
+    figure, axes = plt.subplots(
+        1,
+        len(panels),
+        figsize=(5.0 * len(panels), 4.4),
+        sharex=True,
+        sharey=True,
+        constrained_layout=True,
+        squeeze=False,
+    )
+    handles = []
+    labels = []
+    for axis, ((horizon, gru_width), panel_title) in zip(axes.flat, panels):
+        subset = [
+            row
+            for row in summaries
+            if int(row["training_steps_billions"]) == horizon
+            and int(row["gru_hidden_dim"]) == gru_width
+        ]
+        for level in expected_levels:
+            curve = sorted(
+                (
+                    row
+                    for row in subset
+                    if int(row["diversity_n2"]) == level
+                ),
+                key=lambda row: int(row["adaptation_steps"]),
+            )
+            x = np.asarray(
+                [float(row["adaptation_steps_millions"]) for row in curve]
+            )
+            mean = np.asarray([float(row["mean_success_rate"]) for row in curve])
+            sem = np.asarray([float(row["sem_success_rate"]) for row in curve])
+            diversity_n = math.isqrt(level)
+            label = f"{diversity_n}²"
+            (line,) = axis.plot(
+                x,
+                mean,
+                color=colors[diversity_n],
+                linewidth=1.7,
+                label=label,
+            )
+            axis.fill_between(
+                x,
+                mean - sem,
+                mean + sem,
+                color=colors[diversity_n],
+                alpha=0.14,
+                linewidth=0,
+            )
+            if label not in labels:
+                handles.append(line)
+                labels.append(label)
+        axis.set_title(panel_title)
+        axis.set_ylim(-0.02, 1.02)
+        axis.grid(axis="y", alpha=0.20)
+    figure.supxlabel("Held-out adaptation steps (millions)")
+    figure.supylabel("Held-out success rate")
+    figure.suptitle(title, fontsize=14)
+    figure.legend(
+        handles,
+        labels,
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.01),
+        ncol=5,
+        fontsize=8,
+        frameon=False,
+    )
+    for suffix in (".png", ".pdf"):
+        _atomic_save_figure(figure, destination.with_suffix(suffix))
+    plt.close(figure)
+
+
+def create_fixed_final_adaptation_plots(
+    config_path: str | Path,
+    condition_roots: Mapping[tuple[int, int], str | Path],
+    output_root: str | Path,
+) -> list[Path]:
+    """Compare 100M held-out branches from the four retained fixed checkpoints."""
+
+    config = load_config(config_path)
+    if len(config.experiment.methods) != 1:
+        raise PlotDataError(
+            "fixed-final adaptation comparison requires one configured method"
+        )
+    actual_conditions = frozenset(condition_roots)
+    if actual_conditions != FIXED_FINAL_ADAPT_CONDITIONS:
+        missing = sorted(FIXED_FINAL_ADAPT_CONDITIONS - actual_conditions)
+        unexpected = sorted(actual_conditions - FIXED_FINAL_ADAPT_CONDITIONS)
+        raise PlotDataError(
+            "fixed-final adaptation roots must be exactly "
+            f"{sorted(FIXED_FINAL_ADAPT_CONDITIONS)}; "
+            f"missing={missing}, unexpected={unexpected}"
+        )
+
+    condition_rows: dict[tuple[int, int], list[MetricRow]] = {}
+    target: int | None = None
+    for condition, root in sorted(condition_roots.items()):
+        rows, condition_target = _read_fixed_final_adaptation_condition(
+            root, config, condition=condition
+        )
+        if target is not None and condition_target != target:
+            raise PlotDataError("adaptation conditions use different step horizons")
+        target = condition_target
+        condition_rows[condition] = rows
+    assert target is not None
+
+    summaries = _fixed_final_adaptation_summary_rows(
+        condition_rows, condition_roots, target=target
+    )
+    expected_levels = tuple(config.experiment.diversity_levels)
+    plot_dir = Path(output_root).expanduser().resolve() / "plots"
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    destinations = (
+        plot_dir / "fixed_final_heldout_terminal_2b_gru_widths",
+        plot_dir / "fixed_final_heldout_terminal_gru256_1b_vs_2b",
+        plot_dir / "fixed_final_heldout_curves_2b_gru_widths",
+        plot_dir / "fixed_final_heldout_curves_gru256_1b_vs_2b",
+    )
+
+    _fixed_final_terminal_plot(
+        summaries,
+        series=(
+            ((2, 256), "GRU width 256"),
+            ((2, 512), "GRU width 512"),
+            ((2, 1024), "GRU width 1024"),
+        ),
+        expected_levels=expected_levels,
+        destination=destinations[0],
+        title="Held-out adaptation endpoint after 2B pretraining",
+    )
+    _fixed_final_terminal_plot(
+        summaries,
+        series=(
+            ((1, 256), "1B-step pretraining"),
+            ((2, 256), "2B-step pretraining"),
+        ),
+        expected_levels=expected_levels,
+        destination=destinations[1],
+        title="Held-out adaptation endpoint: 1B vs 2B (GRU width 256)",
+    )
+    _fixed_final_adaptation_curve_panels(
+        summaries,
+        panels=(
+            ((2, 256), "GRU width 256"),
+            ((2, 512), "GRU width 512"),
+            ((2, 1024), "GRU width 1024"),
+        ),
+        expected_levels=expected_levels,
+        destination=destinations[2],
+        title="Held-out learning curves after 2B pretraining",
+    )
+    _fixed_final_adaptation_curve_panels(
+        summaries,
+        panels=(
+            ((1, 256), "After 1B pretraining"),
+            ((2, 256), "After 2B pretraining"),
+        ),
+        expected_levels=expected_levels,
+        destination=destinations[3],
+        title="Held-out learning curves: 1B vs 2B (GRU width 256)",
+    )
+
+    summary_path = plot_dir / "fixed_final_heldout_adaptation_detailed.csv"
+    _write_fixed_final_adaptation_summary(summaries, summary_path)
+    outputs = [
+        destination.with_suffix(suffix)
+        for destination in destinations
+        for suffix in (".png", ".pdf")
+    ]
+    outputs.append(summary_path)
+    return outputs
+
+
 def _core_aux_expected_source(width: int, seed: int) -> str:
     return (
         "core_aux_2b/ppo_cbp/"
@@ -1514,6 +1937,24 @@ def _build_parser() -> argparse.ArgumentParser:
         help="compare terminal GRU-256 performance after independent 1B and 2B runs",
     )
     parser.add_argument(
+        "--fixed-final-adaptation-comparison",
+        action="store_true",
+        help=(
+            "compare 100M held-out branches from the retained fixed 1B/2B "
+            "terminal checkpoints"
+        ),
+    )
+    parser.add_argument(
+        "--fixed-adaptation-run",
+        action="append",
+        nargs=3,
+        metavar=("HORIZON_B", "GRU_WIDTH", "OUTPUT_ROOT"),
+        help=(
+            "pretraining horizon, GRU width, and completed held-out result "
+            "root; repeat for all four retained checkpoint conditions"
+        ),
+    )
+    parser.add_argument(
         "--core-aux-2b-only",
         action="store_true",
         help=(
@@ -1545,6 +1986,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.fixed_2b_fresh_only,
             args.gru_width_comparison,
             args.fixed_horizon_comparison,
+            args.fixed_final_adaptation_comparison,
             args.core_aux_2b_only,
         )
     )
@@ -1557,6 +1999,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             "--fixed-1b-root and --fixed-2b-root require "
             "--fixed-horizon-comparison"
         )
+    if not args.fixed_final_adaptation_comparison and args.fixed_adaptation_run:
+        raise SystemExit(
+            "--fixed-adaptation-run requires "
+            "--fixed-final-adaptation-comparison"
+        )
     if args.core_aux_2b_only:
         if args.source_output_root is not None or args.gru_width_run:
             raise SystemExit(
@@ -1564,6 +2011,39 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "or --gru-width-run"
             )
         outputs = create_core_aux_2b_plots(args.config, args.output_root)
+    elif args.fixed_final_adaptation_comparison:
+        if (
+            args.source_output_root is not None
+            or args.gru_width_run
+            or args.fixed_1b_root is not None
+            or args.fixed_2b_root is not None
+        ):
+            raise SystemExit(
+                "fixed-final adaptation comparison uses only "
+                "--fixed-adaptation-run roots"
+            )
+        if not args.fixed_adaptation_run:
+            raise SystemExit(
+                "--fixed-final-adaptation-comparison requires four "
+                "--fixed-adaptation-run values"
+            )
+        condition_roots: dict[tuple[int, int], Path] = {}
+        for horizon_text, width_text, root_text in args.fixed_adaptation_run:
+            try:
+                condition = (int(horizon_text), int(width_text))
+            except ValueError as error:
+                raise SystemExit(
+                    "fixed adaptation horizon and GRU width must be integers"
+                ) from error
+            if condition in condition_roots:
+                raise SystemExit(
+                    "duplicate fixed adaptation condition: "
+                    f"{condition[0]}B/GRU-{condition[1]}"
+                )
+            condition_roots[condition] = Path(root_text)
+        outputs = create_fixed_final_adaptation_plots(
+            args.config, condition_roots, args.output_root
+        )
     elif args.fixed_horizon_comparison:
         if args.source_output_root is not None or args.gru_width_run:
             raise SystemExit(
@@ -1624,6 +2104,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         if args.gru_width_run:
             raise SystemExit("--gru-width-run requires --gru-width-comparison")
+        if args.fixed_adaptation_run:
+            raise SystemExit(
+                "--fixed-adaptation-run requires "
+                "--fixed-final-adaptation-comparison"
+            )
         if args.source_output_root is not None:
             raise SystemExit("--source-output-root requires --fixed-2b-only")
         outputs = create_plots(args.config, args.output_root, threshold=args.threshold)

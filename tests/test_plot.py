@@ -18,6 +18,7 @@ from td2.plot import (
     create_core_aux_2b_plots,
     create_fixed_2b_fresh_plot,
     create_fixed_2b_plot,
+    create_fixed_final_adaptation_plots,
     create_fixed_horizon_terminal_plot,
     create_gru_width_terminal_plot,
     create_plots,
@@ -557,6 +558,117 @@ def test_fixed_horizon_terminal_plot_uses_exact_1b_and_2b_roots(
             incomplete,
             two_b_root,
             tmp_path / "bad-comparison",
+        )
+
+
+def _write_fixed_final_adaptation_fixture(
+    output_root: Path,
+    *,
+    terminal_success: float,
+    terminal_step: int = 99_876_864,
+    omitted: tuple[int, int] | None = None,
+    missing_initial: tuple[int, int] | None = None,
+) -> None:
+    config = load_config(EXPERIMENT_CONFIG)
+    for diversity_n2 in config.experiment.diversity_levels:
+        diversity_n = math.isqrt(diversity_n2)
+        for seed in config.runtime.seeds:
+            if omitted == (diversity_n2, seed):
+                continue
+            rows = [
+                _row(
+                    method="ppo_cbp",
+                    diversity_n=diversity_n,
+                    diversity_n2=diversity_n2,
+                    seed=seed,
+                    mode="adapt_fixed_eval",
+                    distribution=1,
+                    source_distribution=1,
+                    adaptation_steps=0,
+                    nominal_environment_steps=100_000_000,
+                    success_rate=terminal_success - 0.1 + seed * 0.001,
+                ),
+                _row(
+                    method="ppo_cbp",
+                    diversity_n=diversity_n,
+                    diversity_n2=diversity_n2,
+                    seed=seed,
+                    mode="adapt_fixed_eval",
+                    distribution=1,
+                    source_distribution=1,
+                    adaptation_steps=terminal_step,
+                    nominal_environment_steps=100_000_000,
+                    success_rate=terminal_success + seed * 0.001,
+                ),
+            ]
+            if missing_initial == (diversity_n2, seed):
+                rows = rows[1:]
+            _write_metrics(
+                output_root
+                / "adapt_fixed"
+                / "ppo_cbp"
+                / f"diversity_{diversity_n2}"
+                / f"seed_{seed}"
+                / "metrics.csv",
+                rows,
+            )
+
+
+def test_fixed_final_adaptation_plots_use_four_complete_condition_roots(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("matplotlib")
+    roots: dict[tuple[int, int], Path] = {}
+    for condition, success in (
+        ((1, 256), 0.50),
+        ((2, 256), 0.60),
+        ((2, 512), 0.70),
+        ((2, 1024), 0.80),
+    ):
+        root = tmp_path / f"{condition[0]}b_gru{condition[1]}"
+        _write_fixed_final_adaptation_fixture(root, terminal_success=success)
+        roots[condition] = root
+
+    outputs = create_fixed_final_adaptation_plots(
+        EXPERIMENT_CONFIG, roots, tmp_path / "comparison"
+    )
+
+    assert len(outputs) == 9
+    assert all(path.is_file() and path.stat().st_size > 0 for path in outputs)
+    with outputs[-1].open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert len(rows) == 4 * 9 * 2
+    terminal = [
+        row
+        for row in rows
+        if row["training_steps_billions"] == "2"
+        and row["gru_hidden_dim"] == "1024"
+        and row["diversity_n2"] == "1"
+        and row["is_terminal"] == "1"
+    ]
+    assert len(terminal) == 1
+    assert float(terminal[0]["mean_success_rate"]) == pytest.approx(0.802)
+
+    incomplete = tmp_path / "incomplete"
+    _write_fixed_final_adaptation_fixture(
+        incomplete, terminal_success=0.9, omitted=(1, 0)
+    )
+    bad_roots = dict(roots)
+    bad_roots[(1, 256)] = incomplete
+    with pytest.raises(PlotDataError, match="missing streams"):
+        create_fixed_final_adaptation_plots(
+            EXPERIMENT_CONFIG, bad_roots, tmp_path / "bad-comparison"
+        )
+
+    partial = tmp_path / "partial-grid"
+    _write_fixed_final_adaptation_fixture(
+        partial, terminal_success=0.9, missing_initial=(1, 0)
+    )
+    partial_roots = dict(roots)
+    partial_roots[(1, 256)] = partial
+    with pytest.raises(PlotDataError, match="evaluation-step grid"):
+        create_fixed_final_adaptation_plots(
+            EXPERIMENT_CONFIG, partial_roots, tmp_path / "partial-comparison"
         )
 
 

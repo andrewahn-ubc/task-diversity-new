@@ -9,6 +9,7 @@ LAUNCHERS = (
     ROOT / "scripts" / "submit_all.sh",
     ROOT / "scripts" / "submit_fixed_2b.sh",
     ROOT / "scripts" / "submit_core_aux_2b.sh",
+    ROOT / "scripts" / "submit_fixed_final_adaptation.sh",
 )
 
 

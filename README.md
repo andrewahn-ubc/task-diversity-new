@@ -137,6 +137,46 @@ mean/SEM table under
 The two lines are separate experiments with their respective 1B and clean 2B
 learning-rate schedules; the 2B line is not the older 1B-to-2B extension.
 
+### Adapt every retained fixed-run endpoint on the held-out tasks
+
+The completed fixed runs retain an exact final checkpoint for every diversity
+and seed. To branch from all of those endpoints, train each branch for 100M
+steps on that seed's existing 100-task held-out set, and generate the four
+endpoint/learning-curve comparisons, run one command on Narval:
+
+```bash
+bash scripts/submit_fixed_final_adaptation.sh
+```
+
+The launcher first validates every `DONE` marker, `resume/latest.json`, pointed
+checkpoint blob, protocol identity, and exact terminal counter. It then submits
+one 180-element GPU array under `def-krallen`, followed by one CPU plotting job.
+The four unique parent groups are 1B/GRU-256 and 2B/GRU-256, 512, and 1024;
+2B/GRU-256 is computed once and reused in both comparisons. The wider clean-2B
+runs did not preserve immutable 1B midpoint checkpoints, so no unsupported
+1B/GRU-512 or 1B/GRU-1024 result is inferred.
+
+Results are written under
+`/scratch/taegyoem/td2-results-10dist-9div-cbp-seeded100-fixed-final-heldout-100m`.
+Its `plots/` directory contains PNG/PDF versions of:
+
+- terminal held-out performance after 100M adaptation, comparing all three 2B
+  GRU widths;
+- terminal held-out performance after 100M adaptation, comparing 1B and 2B at
+  GRU width 256;
+- held-out success throughout the 100M-step adaptation for the three 2B GRU
+  widths; and
+- held-out success throughout adaptation for 1B versus 2B at GRU width 256.
+
+The same directory contains
+`fixed_final_heldout_adaptation_detailed.csv`, with the mean, SEM, seed count,
+and source root for every plotted evaluation point. If the array is interrupted,
+wait until its earlier `td2-finaladapt*` jobs have stopped and run:
+
+```bash
+bash scripts/submit_fixed_final_adaptation.sh --resume
+```
+
 ### Run the 16²-core damage experiment
 
 This experiment tests whether progressively larger, disjoint auxiliary pools

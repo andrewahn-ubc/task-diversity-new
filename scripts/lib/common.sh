@@ -138,6 +138,12 @@ td2_adapt_dir() {
     "$output_root" "$algorithm" "$diversity" "$seed" "$stage"
 }
 
+td2_fixed_adapt_dir() {
+  local condition_root=$1 algorithm=$2 diversity=$3 seed=$4
+  printf '%s/adapt_fixed/%s/diversity_%s/seed_%s\n' \
+    "$condition_root" "$algorithm" "$diversity" "$seed"
+}
+
 td2_install_signal_forwarders() {
   TD2_ACTIVE_CHILD=''
   trap 'if [[ -n ${TD2_ACTIVE_CHILD:-} ]]; then kill -USR1 "$TD2_ACTIVE_CHILD" 2>/dev/null || true; fi' USR1

@@ -209,6 +209,14 @@ def _stream_root(
             / f"aux_diversity_{diversity_n2}"
             / f"seed_{seed}"
         )
+    if mode == "adapt_fixed":
+        return (
+            output_root
+            / "adapt_fixed"
+            / algorithm
+            / f"diversity_{diversity_n2}"
+            / f"seed_{seed}"
+        )
     if stage is None:
         raise ValueError("adaptation mode requires --stage")
     return (
@@ -2249,11 +2257,176 @@ def _run_core_aux_2b(
     return True
 
 
+def _fixed_terminal_adaptation_identity(
+    base_identity: Mapping[str, Any],
+    *,
+    source_mode: str,
+    source_checkpoint_sha256: str,
+    source_updates: int,
+    gru_hidden_dim: int,
+    schedule: RunSchedule,
+) -> dict[str, Any]:
+    """Bind a held-out branch to one exact completed fixed-run checkpoint."""
+
+    identity = dict(base_identity)
+    identity["fixed_terminal_adaptation"] = {
+        "version": 1,
+        "source_mode": source_mode,
+        "source_checkpoint_sha256": source_checkpoint_sha256,
+        "source_updates": int(source_updates),
+        "gru_hidden_dim": int(gru_hidden_dim),
+        "heldout_updates": int(schedule.num_updates),
+        "heldout_optimizer_steps": int(schedule.total_optimizer_steps),
+        "heldout_warmup_optimizer_steps": int(schedule.warmup_optimizer_steps),
+        "schedule_step_reset": True,
+        "parent_params_adam_cbp_preserved": True,
+    }
+    return identity
+
+
+def _load_fixed_terminal_parent(
+    args, config: TD2Config, diversity_n: int
+) -> tuple[Any, Any, dict[str, Any]]:
+    """Load and strictly validate a completed 1B or clean-2B fixed runner."""
+
+    assert args.source_output_root is not None
+    assert args.source_mode in ("fixed", "fixed_2b_fresh")
+    base_identity = _protocol_identity(
+        config, args.data_root, expected_data_seed=args.seed
+    )
+    schedule = config.derived.training_per_distribution
+    if args.source_mode == "fixed":
+        source_identity = base_identity
+        target_updates = config.derived.total_training_updates_per_stream
+        target_optimizer_steps = (
+            config.derived.total_training_optimizer_steps_per_stream
+        )
+    else:
+        target_updates, target_optimizer_steps, warmup_optimizer_steps = (
+            _fixed_2b_schedule(config)
+        )
+        source_identity = _fixed_2b_fresh_protocol_identity(
+            base_identity,
+            target_updates=target_updates,
+            target_optimizer_steps=target_optimizer_steps,
+            warmup_optimizer_steps=warmup_optimizer_steps,
+        )
+
+    source_stream = _stream_root(
+        args.source_output_root,
+        mode=args.source_mode,
+        algorithm=args.algorithm,
+        diversity_n2=diversity_n * diversity_n,
+        seed=args.seed,
+        stage=None,
+    )
+    if not (source_stream / "DONE").is_file():
+        raise CheckpointError(f"fixed-run source is not complete: {source_stream}")
+    source_checkpoint = source_stream / "resume"
+    template, _, _, _ = _runner_template(
+        config,
+        args.data_root,
+        algorithm=args.algorithm,
+        diversity_n=diversity_n,
+        distribution=1,
+        seed=args.seed,
+    )
+    pointer_metadata = checkpoint_metadata(source_checkpoint)
+    _validate_identity(
+        pointer_metadata,
+        mode=args.source_mode,
+        algorithm=args.algorithm,
+        diversity_n=diversity_n,
+        seed=args.seed,
+        protocol_identity=source_identity,
+    )
+    parent, metadata = load_checkpoint_with_metadata(source_checkpoint, template)
+    _validate_identity(
+        metadata,
+        mode=args.source_mode,
+        algorithm=args.algorithm,
+        diversity_n=diversity_n,
+        seed=args.seed,
+        protocol_identity=source_identity,
+    )
+    _validate_checkpoint_counters(metadata, parent)
+    if int(metadata.get("distribution", -1)) != 1 or int(
+        metadata.get("source_distribution", -1)
+    ) != 1:
+        raise CheckpointError("fixed-run source distribution mismatch")
+    _require_exact_runner_counters(
+        parent,
+        expected={
+            "update_in_phase": target_updates,
+            "global_update": target_updates,
+            "optimizer_steps": target_optimizer_steps,
+            "schedule_step": target_optimizer_steps,
+        },
+        label=f"{args.source_mode} adaptation source",
+    )
+    adaptation_schedule = config.derived.adaptation_per_probe
+    if adaptation_schedule is None:
+        raise ValueError("adaptation is disabled in the configuration")
+    branch_identity = _fixed_terminal_adaptation_identity(
+        base_identity,
+        source_mode=args.source_mode,
+        source_checkpoint_sha256=_checkpoint_sha256(source_checkpoint),
+        source_updates=target_updates,
+        gru_hidden_dim=config.network.recurrent_hidden_dim,
+        schedule=adaptation_schedule,
+    )
+    return parent.learner, parent.global_update, branch_identity
+
+
 def _run_adapt(args, config: TD2Config, diversity_n: int, stream_root: Path) -> bool:
     assert args.stage is not None
     protocol_identity = _protocol_identity(
         config, args.data_root, expected_data_seed=args.seed
     )
+    parent_learner, parent_global = _load_parent_learner(
+        args, config, diversity_n, args.stage, protocol_identity
+    )
+    return _run_adaptation_branch(
+        args,
+        config,
+        diversity_n,
+        stream_root,
+        protocol_identity=protocol_identity,
+        parent_learner=parent_learner,
+        parent_global=parent_global,
+        source_distribution=args.stage,
+    )
+
+
+def _run_adapt_fixed(
+    args, config: TD2Config, diversity_n: int, stream_root: Path
+) -> bool:
+    parent_learner, parent_global, protocol_identity = (
+        _load_fixed_terminal_parent(args, config, diversity_n)
+    )
+    return _run_adaptation_branch(
+        args,
+        config,
+        diversity_n,
+        stream_root,
+        protocol_identity=protocol_identity,
+        parent_learner=parent_learner,
+        parent_global=parent_global,
+        source_distribution=1,
+    )
+
+
+def _run_adaptation_branch(
+    args,
+    config: TD2Config,
+    diversity_n: int,
+    stream_root: Path,
+    *,
+    protocol_identity: Mapping[str, Any],
+    parent_learner,
+    parent_global,
+    source_distribution: int,
+) -> bool:
     schedule = config.derived.adaptation_per_probe
     if schedule is None:
         raise ValueError("adaptation is disabled in the configuration")
@@ -2266,9 +2439,8 @@ def _run_adapt(args, config: TD2Config, diversity_n: int, stream_root: Path) -> 
         heldout=True,
     )
     components = build_components(config, heldout_env, algorithm=args.algorithm)
-    parent_learner, parent_global = _load_parent_learner(
-        args, config, diversity_n, args.stage, protocol_identity
-    )
+    parent_global_update = _as_int(parent_global)
+    parent_optimizer_steps = _as_int(parent_learner.optimizer_steps)
     # Each heldout branch is a separate, fixed-budget adaptation run.  Give all
     # stages the same authors-style 100M-step schedule while leaving the main
     # continual trajectory's schedule uninterrupted across distributions.
@@ -2279,7 +2451,7 @@ def _run_adapt(args, config: TD2Config, diversity_n: int, stream_root: Path) -> 
         jax.random.PRNGKey(args.seed),
         0x41444150,
         diversity_n * diversity_n,
-        args.stage,
+        source_distribution,
     )
     template = initialize_runner(
         key,
@@ -2294,7 +2466,7 @@ def _run_adapt(args, config: TD2Config, diversity_n: int, stream_root: Path) -> 
         pointer_metadata = checkpoint_metadata(resume_root)
         _validate_identity(
             pointer_metadata,
-            mode="adapt",
+            mode=args.mode,
             algorithm=args.algorithm,
             diversity_n=diversity_n,
             seed=args.seed,
@@ -2303,14 +2475,14 @@ def _run_adapt(args, config: TD2Config, diversity_n: int, stream_root: Path) -> 
         runner, metadata = load_checkpoint_with_metadata(resume_root, template)
         _validate_identity(
             metadata,
-            mode="adapt",
+            mode=args.mode,
             algorithm=args.algorithm,
             diversity_n=diversity_n,
             seed=args.seed,
             protocol_identity=protocol_identity,
         )
         _validate_checkpoint_counters(metadata, runner)
-        if int(metadata.get("source_distribution", -1)) != args.stage:
+        if int(metadata.get("source_distribution", -1)) != source_distribution:
             raise CheckpointError("adaptation source stage mismatch")
     else:
         runner = template
@@ -2327,7 +2499,7 @@ def _run_adapt(args, config: TD2Config, diversity_n: int, stream_root: Path) -> 
             components,
             args.data_root,
             diversity_n=diversity_n,
-            distribution=args.stage,
+            distribution=source_distribution,
             heldout=True,
         )
     )
@@ -2350,7 +2522,7 @@ def _run_adapt(args, config: TD2Config, diversity_n: int, stream_root: Path) -> 
                 _eval_key(
                     seed=args.seed,
                     diversity_n2=diversity_n * diversity_n,
-                    distribution=args.stage,
+                    distribution=source_distribution,
                     update=0,
                     heldout=True,
                 ),
@@ -2362,11 +2534,11 @@ def _run_adapt(args, config: TD2Config, diversity_n: int, stream_root: Path) -> 
                 algorithm=args.algorithm,
                 diversity_n=diversity_n,
                 seed=args.seed,
-                mode="adapt_eval",
-                distribution=args.stage,
+                mode=f"{args.mode}_eval",
+                distribution=source_distribution,
                 runner=runner,
                 schedule=schedule,
-                source_distribution=args.stage,
+                source_distribution=source_distribution,
             )
 
         update_started = time.monotonic()
@@ -2380,11 +2552,11 @@ def _run_adapt(args, config: TD2Config, diversity_n: int, stream_root: Path) -> 
             algorithm=args.algorithm,
             diversity_n=diversity_n,
             seed=args.seed,
-            mode="adapt_train",
-            distribution=args.stage,
+            mode=f"{args.mode}_train",
+            distribution=source_distribution,
             runner=runner,
             schedule=schedule,
-            source_distribution=args.stage,
+            source_distribution=source_distribution,
         )
 
         update_in_phase = _as_int(runner.update_in_phase)
@@ -2394,7 +2566,7 @@ def _run_adapt(args, config: TD2Config, diversity_n: int, stream_root: Path) -> 
                 _eval_key(
                     seed=args.seed,
                     diversity_n2=diversity_n * diversity_n,
-                    distribution=args.stage,
+                    distribution=source_distribution,
                     update=update_in_phase,
                     heldout=True,
                 ),
@@ -2406,11 +2578,11 @@ def _run_adapt(args, config: TD2Config, diversity_n: int, stream_root: Path) -> 
                 algorithm=args.algorithm,
                 diversity_n=diversity_n,
                 seed=args.seed,
-                mode="adapt_eval",
-                distribution=args.stage,
+                mode=f"{args.mode}_eval",
+                distribution=source_distribution,
                 runner=runner,
                 schedule=schedule,
-                source_distribution=args.stage,
+                source_distribution=source_distribution,
             )
 
         now = time.monotonic()
@@ -2418,13 +2590,13 @@ def _run_adapt(args, config: TD2Config, diversity_n: int, stream_root: Path) -> 
             _save_resume(
                 stream_root,
                 runner,
-                mode="adapt",
+                mode=args.mode,
                 algorithm=args.algorithm,
                 diversity_n=diversity_n,
                 seed=args.seed,
-                distribution=args.stage,
+                distribution=source_distribution,
                 protocol_identity=protocol_identity,
-                source_distribution=args.stage,
+                source_distribution=source_distribution,
             )
             last_checkpoint = now
         predicted = max(recent_durations, default=60.0) * 1.25 + 120.0
@@ -2436,24 +2608,36 @@ def _run_adapt(args, config: TD2Config, diversity_n: int, stream_root: Path) -> 
             _save_resume(
                 stream_root,
                 runner,
-                mode="adapt",
+                mode=args.mode,
                 algorithm=args.algorithm,
                 diversity_n=diversity_n,
                 seed=args.seed,
-                distribution=args.stage,
+                distribution=source_distribution,
                 protocol_identity=protocol_identity,
-                source_distribution=args.stage,
+                source_distribution=source_distribution,
             )
             return False
 
     update_in_phase = _as_int(runner.update_in_phase)
+    _require_exact_runner_counters(
+        runner,
+        expected={
+            "update_in_phase": schedule.num_updates,
+            "global_update": parent_global_update + schedule.num_updates,
+            "optimizer_steps": (
+                parent_optimizer_steps + schedule.total_optimizer_steps
+            ),
+            "schedule_step": schedule.total_optimizer_steps,
+        },
+        label="terminal held-out adaptation checkpoint",
+    )
     if evaluate is not None:
         evaluation = evaluate(
             runner.learner.params,
             _eval_key(
                 seed=args.seed,
                 diversity_n2=diversity_n * diversity_n,
-                distribution=args.stage,
+                distribution=source_distribution,
                 update=update_in_phase,
                 heldout=True,
             ),
@@ -2465,32 +2649,32 @@ def _run_adapt(args, config: TD2Config, diversity_n: int, stream_root: Path) -> 
             algorithm=args.algorithm,
             diversity_n=diversity_n,
             seed=args.seed,
-            mode="adapt_eval",
-            distribution=args.stage,
+            mode=f"{args.mode}_eval",
+            distribution=source_distribution,
             runner=runner,
             schedule=schedule,
-            source_distribution=args.stage,
+            source_distribution=source_distribution,
         )
     _save_resume(
         stream_root,
         runner,
-        mode="adapt",
+        mode=args.mode,
         algorithm=args.algorithm,
         diversity_n=diversity_n,
         seed=args.seed,
-        distribution=args.stage,
+        distribution=source_distribution,
         protocol_identity=protocol_identity,
-        source_distribution=args.stage,
+        source_distribution=source_distribution,
     )
     metadata = _checkpoint_meta(
-        mode="adapt",
+        mode=args.mode,
         algorithm=args.algorithm,
         diversity_n=diversity_n,
         seed=args.seed,
-        distribution=args.stage,
+        distribution=source_distribution,
         runner=runner,
         protocol_identity=protocol_identity,
-        source_distribution=args.stage,
+        source_distribution=source_distribution,
     )
     atomic_marker(stream_root / "DONE", metadata)
     return True
@@ -2507,6 +2691,7 @@ def _parse_args(argv: list[str] | None = None):
             "fixed_2b_fresh",
             "core_aux_2b",
             "adapt",
+            "adapt_fixed",
         ),
         required=True,
     )
@@ -2514,6 +2699,11 @@ def _parse_args(argv: list[str] | None = None):
     parser.add_argument("--data-root", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--source-output-root", type=Path)
+    parser.add_argument(
+        "--source-mode",
+        choices=("fixed", "fixed_2b_fresh"),
+        help="completed fixed-run kind used by --mode adapt_fixed",
+    )
     parser.add_argument("--algorithm", choices=("ppo", "ppo_cbp"), required=True)
     parser.add_argument("--diversity", type=int, required=True, help="n^2 diversity")
     parser.add_argument("--seed", type=int, required=True)
@@ -2558,8 +2748,20 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("--source-output-root is required with --mode fixed_2b")
         if args.source_output_root == args.output_root:
             raise ValueError("2B source and extension output roots must differ")
-    elif args.source_output_root is not None:
-        raise ValueError("--source-output-root is valid only with --mode fixed_2b")
+        if args.source_mode is not None:
+            raise ValueError("--source-mode is valid only with --mode adapt_fixed")
+    elif args.mode == "adapt_fixed":
+        if args.source_output_root is None or args.source_mode is None:
+            raise ValueError(
+                "--mode adapt_fixed requires --source-output-root and --source-mode"
+            )
+        if args.source_output_root == args.output_root:
+            raise ValueError("adaptation source and branch output roots must differ")
+    elif args.source_output_root is not None or args.source_mode is not None:
+        raise ValueError(
+            "--source-output-root is valid only with --mode fixed_2b or "
+            "adapt_fixed; --source-mode is valid only with adapt_fixed"
+        )
     if args.stop_after_distribution is not None:
         if args.mode != "main":
             raise ValueError("--stop-after-distribution is valid only with --mode main")
@@ -2589,6 +2791,8 @@ def main(argv: list[str] | None = None) -> int:
         completed = _run_fixed_2b_fresh(args, config, diversity_n, stream_root)
     elif args.mode == "core_aux_2b":
         completed = _run_core_aux_2b(args, config, diversity_n, stream_root)
+    elif args.mode == "adapt_fixed":
+        completed = _run_adapt_fixed(args, config, diversity_n, stream_root)
     else:
         completed = _run_adapt(args, config, diversity_n, stream_root)
     print(
