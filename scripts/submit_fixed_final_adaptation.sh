@@ -9,7 +9,7 @@ REPO_ROOT=$(td2_repo_root)
 
 CLUSTER=narval
 ACCOUNT=def-krallen
-DATA_ROOT=/scratch/taegyoem/td2-data-10dist-9div-cbp-seeded100
+DATA_ROOT=''
 OUTPUT_ROOT=/scratch/taegyoem/td2-results-10dist-9div-cbp-seeded100-fixed-final-heldout-100m
 SOURCE_1B_256=/scratch/taegyoem/td2-results-10dist-9div-cbp-seeded100-fixed1b
 SOURCE_2B_256=/scratch/taegyoem/td2-results-10dist-9div-cbp-seeded100-fixed2b-fresh
@@ -32,6 +32,7 @@ allocation.
 Options:
   --cluster NAME              Slurm cluster (default: narval)
   --data-root PATH            Existing five seed-specific task bundles
+                              (default: path recorded by the 2B/GRU-256 run)
   --output-root PATH          New held-out adaptation output root
   --fixed-1b-gru256-root PATH Completed original fixed 1B result root
   --fixed-2b-gru256-root PATH Completed clean fixed 2B GRU-256 root
@@ -88,15 +89,27 @@ fi
 CONFIG_256="$REPO_ROOT/configs/experiment.yaml"
 CONFIG_512="$REPO_ROOT/configs/experiment_gru512.yaml"
 CONFIG_1024="$REPO_ROOT/configs/experiment_gru1024.yaml"
-for path in "$DATA_ROOT" "$SOURCE_1B_256" "$SOURCE_2B_256" \
-  "$SOURCE_2B_512" "$SOURCE_2B_1024"; do
+for path in "$SOURCE_1B_256" "$SOURCE_2B_256" "$SOURCE_2B_512" \
+  "$SOURCE_2B_1024"; do
   [[ -d $path ]] || td2_die "required Narval path does not exist: $path"
 done
-DATA_ROOT=$(cd -- "$DATA_ROOT" && pwd -P)
 SOURCE_1B_256=$(cd -- "$SOURCE_1B_256" && pwd -P)
 SOURCE_2B_256=$(cd -- "$SOURCE_2B_256" && pwd -P)
 SOURCE_2B_512=$(cd -- "$SOURCE_2B_512" && pwd -P)
 SOURCE_2B_1024=$(cd -- "$SOURCE_2B_1024" && pwd -P)
+
+if [[ -z $DATA_ROOT ]]; then
+  SOURCE_RECEIPT="$SOURCE_2B_256/.orchestration/initial-submission.txt"
+  [[ -f $SOURCE_RECEIPT ]] || td2_die \
+    "cannot infer --data-root; source receipt is missing: $SOURCE_RECEIPT"
+  DATA_ROOT=$(awk -F= \
+    '$1 == "data_root" {sub(/^[^=]*=/, ""); print; found=1; exit} END {if (!found) exit 1}' \
+    "$SOURCE_RECEIPT") || td2_die \
+    "cannot infer --data-root from source receipt: $SOURCE_RECEIPT"
+  td2_note "using task bundles recorded by the 2B/GRU-256 run: $DATA_ROOT"
+fi
+[[ -d $DATA_ROOT ]] || td2_die "required Narval data root does not exist: $DATA_ROOT"
+DATA_ROOT=$(cd -- "$DATA_ROOT" && pwd -P)
 
 case "$OUTPUT_ROOT$DATA_ROOT$SOURCE_1B_256$SOURCE_2B_256$SOURCE_2B_512$SOURCE_2B_1024$TD2_RUNTIME_ENV$REPO_ROOT" in
   *$'\n'*|*,*|*%*) td2_die "Slurm-exported paths may not contain newlines, commas, or percent signs" ;;
