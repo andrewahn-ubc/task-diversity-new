@@ -525,3 +525,49 @@ validation before production is released.
 - Purab Seth et al., “Task diversity produces systematic transfer but inhibits continual reinforcement learning,” arXiv:2606.00880v2 (2026), supplied with this task.
 
 See `THIRD_PARTY_NOTICES.md` for licenses and the exact code-level provenance.
+
+## Kinetix seven-distribution reproduction
+
+The Kinetix workflow is independent of the Banyan workflow and pins the
+official Kinetix `v0.1.0` reproduction commit. It uses the paper's small
+environment preset, native entity-transformer PPO, three seeds, 100M steps per
+distribution, and diversity pools `1, 4², 8², 16², 256²`. The requested
+modification uses seven disjoint training distributions. After every
+distribution, a branch from each checkpoint adapts for 100M steps on the same
+fixed, separately generated 100-task heldout bank; branch updates never enter
+the continual trajectory. Backward-transfer evaluation is omitted.
+
+On a Narval login node, run setup once and then submit:
+
+```bash
+cd /home/taegyoem/scratch/task-diversity-new
+git pull --ff-only
+
+bash scripts/setup_kinetix_compute_canada.sh \
+  --runtime-root /scratch/taegyoem/td2-kinetix-runtime \
+  --data-root /scratch/taegyoem/td2-kinetix-data-7dist
+
+bash scripts/submit_kinetix_continual.sh \
+  --cluster narval \
+  --data-root /scratch/taegyoem/td2-kinetix-data-7dist \
+  --output-root /scratch/taegyoem/td2-kinetix-results-7dist-heldout100 \
+  --max-concurrent 100
+```
+
+This submits 17 Slurm job IDs: a 22-element filtered-data array, a GPU smoke
+gate, seven sequential 15-element main arrays, seven 15-element heldout arrays,
+and one aggregate job. Every batch request has a one-hour limit and uses only
+`def-krallen`. Long elements atomically checkpoint by 45 minutes and requeue
+the exact array task. If the dependency chain is interrupted, wait until no
+`td2-kinetix*` jobs remain and rerun the submit command with `--resume`.
+
+The aggregate writes exactly the two requested figures plus their detailed
+CSV summaries under the result root:
+
+- `plots/kinetix_training_success.png` — paper-style success over the seven
+  training distributions, with distribution boundaries;
+- `plots/kinetix_heldout_adaptation_success.png` — seven panels showing
+  heldout success over 0–100M adaptation steps for all five diversity levels;
+- `plots/kinetix_training_success_summary.csv` and
+  `plots/kinetix_heldout_adaptation_success_summary.csv` — mean, SEM, seed
+  count, and exact step coordinates behind the plots.

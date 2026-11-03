@@ -43,3 +43,26 @@ https://github.com/nhshah15/banyan/blob/7bb5d385cb2b48f49ab01d0c9a47b9d404e2ecc3
 
 The MIT license text and copyright notice are available at
 https://github.com/shibhansh/loss-of-plasticity/blob/a6b79580d85f3025bdb601566d3627c5f489f13b/LICENSE.
+
+## Kinetix
+
+- Source: https://github.com/FLAIROx/Kinetix
+- Revision: `eed109cb40d777f5ca62eddda134d74d92543870` (`v0.1.0`)
+- License: MIT
+- Use here: Kinetix physics environment, procedural level generator, entity
+  transformer, wrappers, and the reference PPO update structure.
+
+The setup script installs an editable checkout of this exact clean revision in
+the separate Kinetix runtime so its packaged world/config assets remain
+available. Copyright and license terms remain those stated by Kinetix.
+
+## JAXUED
+
+- Source: https://github.com/DramaCow/jaxued
+- Revision: `62d155ae772aa2a0ecac9541d498df7ae88e6def`
+- License: Apache License 2.0
+- Use here: underspecified-environment interfaces required by Kinetix v0.1.0.
+
+This was the head revision available before the Kinetix v0.1.0 release; the
+next JAXUED commit is dated after that release. It is installed as an exact
+editable runtime checkout and is not vendored into this repository.

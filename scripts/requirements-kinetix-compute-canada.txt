@@ -1,0 +1,34 @@
+# Kinetix v0.1.0 was released against JAX 0.4.35.  Keep this runtime
+# independent of the newer Banyan/JAX 0.11 environment.
+jax[cuda12]==0.4.35
+numpy==1.26.4
+flax==0.8.5
+optax==0.2.4
+chex==0.1.88
+distrax==0.1.5
+gymnax==0.0.8
+orbax-checkpoint==0.5.3
+orbax==0.1.9
+jax2d==1.0.0
+jaxgl==1.0.1
+hydra-core==1.3.2
+omegaconf==2.3.0
+PyYAML==6.0.2
+matplotlib==3.9.2
+pandas==2.2.3
+seaborn==0.13.2
+pillow==11.0.0
+safetensors==0.4.5
+wandb==0.18.7
+pygame==2.6.1
+pygame-widgets==1.2.0
+imageio==2.36.1
+moviepy==1.0.3
+black==24.10.0
+pre-commit==4.0.1
+argparse==1.4.0
+
+# Build tools are pinned so locally built pure-Python wheels are reproducible.
+pip==25.2
+setuptools==75.6.0
+wheel==0.45.1
