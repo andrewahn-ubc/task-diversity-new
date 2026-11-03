@@ -129,7 +129,7 @@ td2_note "installing Kinetix runtime strictly from the local wheelhouse"
   --requirement "$REQUIREMENTS"
 for source in "$JAXUED_SOURCE" "$KINETIX_SOURCE"; do
   "$VENV_DIR/bin/python" -m pip install --no-index --find-links "$WHEELHOUSE" \
-    --editable --no-deps --no-build-isolation "$source"
+    --no-deps --no-build-isolation --editable "$source"
 done
 "$VENV_DIR/bin/python" -m pip check
 PYTHONPATH="$REPO_ROOT/src" JAX_PLATFORMS=cpu PYTHONNOUSERSITE=1 \
