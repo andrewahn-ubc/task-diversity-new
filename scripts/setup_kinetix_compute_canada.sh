@@ -11,7 +11,7 @@ KINETIX_COMMIT=eed109cb40d777f5ca62eddda134d74d92543870
 # This was JAXUED main when Kinetix v0.1.0 was released (the next JAXUED
 # commit is dated 2025-03-20, after the Kinetix release).
 JAXUED_COMMIT=62d155ae772aa2a0ecac9541d498df7ae88e6def
-RUNTIME_ROOT=/scratch/taegyoem/td2-kinetix-runtime-official-v2
+RUNTIME_ROOT=/scratch/taegyoem/td2-kinetix-runtime-official-v3
 DATA_ROOT=/scratch/taegyoem/td2-kinetix-data-7dist
 
 usage() {
@@ -130,11 +130,15 @@ fi
 
 [[ -x $VENV_DIR/bin/python ]] || python -m venv "$VENV_DIR"
 td2_note "installing Kinetix runtime strictly from the local wheelhouse"
-"$VENV_DIR/bin/python" -m pip install --no-index --find-links "$WHEELHOUSE" \
-  --requirement "$REQUIREMENTS"
-for source in "$JAXUED_SOURCE" "$KINETIX_SOURCE"; do
+env -u PIP_INDEX_URL -u PIP_EXTRA_INDEX_URL -u PIP_FIND_LINKS -u PIP_NO_INDEX \
+  PIP_CONFIG_FILE=/dev/null \
   "$VENV_DIR/bin/python" -m pip install --no-index --find-links "$WHEELHOUSE" \
-    --no-deps --no-build-isolation --editable "$source"
+    --requirement "$REQUIREMENTS"
+for source in "$JAXUED_SOURCE" "$KINETIX_SOURCE"; do
+  env -u PIP_INDEX_URL -u PIP_EXTRA_INDEX_URL -u PIP_FIND_LINKS -u PIP_NO_INDEX \
+    PIP_CONFIG_FILE=/dev/null \
+    "$VENV_DIR/bin/python" -m pip install --no-index --find-links "$WHEELHOUSE" \
+      --no-deps --no-build-isolation --editable "$source"
 done
 "$VENV_DIR/bin/python" -m pip check
 "$VENV_DIR/bin/python" - <<'PY'
@@ -158,7 +162,10 @@ for distribution in (
     "nvidia-cusolver-cu12",
     "nvidia-cusparse-cu12",
 ):
-    print(f"{distribution}={version(distribution)}")
+    actual = version(distribution)
+    if "+" in actual:
+        raise RuntimeError(f"{distribution}={actual}, expected official wheel")
+    print(f"{distribution}={actual}")
 print("official JAX CUDA runtime wheels: OK")
 PY
 PYTHONPATH="$REPO_ROOT/src" JAX_PLATFORMS=cpu PYTHONNOUSERSITE=1 \
