@@ -19,8 +19,9 @@ usage() {
   cat <<'USAGE'
 Usage: bash scripts/submit_kinetix_continual.sh [options]
 
-Submit 22 level-bank jobs, one GPU gate, seven sequential 15-stream
-training arrays, seven heldout-adaptation arrays, and one aggregate job.
+Submit one CUDA/cuDNN preflight, 22 level-bank jobs, one production GPU gate,
+seven sequential 15-stream training arrays, seven heldout-adaptation arrays,
+and one aggregate job.
 Every job uses def-krallen and has a one-hour walltime.
 
 Options:
@@ -112,10 +113,16 @@ heldout_concurrency=$((MAX_CONCURRENT / 7))
 main_concurrency=$((MAX_CONCURRENT - 6 * heldout_concurrency))
 ((main_concurrency > 15)) && main_concurrency=15
 
+td2_note "submitting isolated CUDA/cuDNN runtime preflight"
+PREFLIGHT_JOB=$(td2_parse_job_id "$(sbatch --parsable "${COMMON_GPU[@]}" \
+  --job-name=td2-kinetix-preflight --output="$LOG_ROOT/preflight-%j.out" \
+  --export="$BASE_EXPORTS" "$REPO_ROOT/slurm/gpu_preflight_kinetix.sbatch")")
+
 td2_note "submitting 22 resumable strict-filter level banks"
 DATA_JOB=$(td2_parse_job_id "$(sbatch --parsable "${COMMON_GPU[@]}" \
   --job-name=td2-kinetix-data --output="$LOG_ROOT/data-%A_%a.out" \
-  --array="0-21%$data_concurrency" --export="$BASE_EXPORTS" \
+  --array="0-21%$data_concurrency" --dependency="afterok:$PREFLIGHT_JOB" \
+  --kill-on-invalid-dep=yes --export="$BASE_EXPORTS" \
   "$REPO_ROOT/slurm/prepare_kinetix_data.sbatch")")
 
 td2_note "submitting production-shaped GPU smoke gate"
@@ -163,7 +170,8 @@ MODE=initial
 [[ $RESUME == false ]] || MODE=resume
 LINES=("state=scheduled" "mode=$MODE" "workflow=kinetix_7dist_heldout100" \
   "cluster=narval" "account=def-krallen" "protocol_id=$PROTOCOL_ID" \
-  "data_root=$DATA_ROOT" "output_root=$OUTPUT_ROOT" "data_job=$DATA_JOB" \
+  "data_root=$DATA_ROOT" "output_root=$OUTPUT_ROOT" "preflight_job=$PREFLIGHT_JOB" \
+  "data_job=$DATA_JOB" \
   "smoke_job=$SMOKE_JOB" "aggregate_job=$AGGREGATE_JOB" \
   "max_concurrent=$MAX_CONCURRENT" "exclude_nodes=${EXCLUDE_NODES:-none}" \
   "data_concurrency=$data_concurrency" "main_concurrency=$main_concurrency" \
@@ -176,6 +184,7 @@ done
 td2_write_receipt "$RECEIPT" "${LINES[@]}"
 
 printf '\nSubmitted Kinetix workflow successfully:\n'
+printf '  CUDA/cuDNN preflight: %s\n' "$PREFLIGHT_JOB"
 printf '  filtered data array: %s (22 banks)\n' "$DATA_JOB"
 printf '  GPU smoke gate:      %s\n' "$SMOKE_JOB"
 printf '  seven main arrays:   %s\n' "${MAIN_JOBS[*]}"

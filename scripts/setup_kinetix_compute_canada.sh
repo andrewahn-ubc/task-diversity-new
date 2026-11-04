@@ -11,7 +11,7 @@ KINETIX_COMMIT=eed109cb40d777f5ca62eddda134d74d92543870
 # This was JAXUED main when Kinetix v0.1.0 was released (the next JAXUED
 # commit is dated 2025-03-20, after the Kinetix release).
 JAXUED_COMMIT=62d155ae772aa2a0ecac9541d498df7ae88e6def
-RUNTIME_ROOT=/scratch/taegyoem/td2-kinetix-runtime
+RUNTIME_ROOT=/scratch/taegyoem/td2-kinetix-runtime-official-v2
 DATA_ROOT=/scratch/taegyoem/td2-kinetix-data-7dist
 
 usage() {
@@ -109,8 +109,13 @@ if [[ ! -f $WHEELHOUSE/.download-complete ]]; then
   # `pip wheel` is intentional: a few historical dependencies publish only a
   # source archive.  Building them here ensures compute jobs never need a
   # compiler or network access.
-  python -m pip wheel --no-cache-dir --wheel-dir "$WHEELHOUSE" \
-    --requirement "$REQUIREMENTS"
+  # Alliance's pip configuration prefers locally rebuilt JAX wheels whose
+  # CUDA plugin omits the NVIDIA `with-cuda` dependencies.  Build this isolated
+  # wheelhouse directly from official PyPI so the exact pins below are honored.
+  env -u PIP_INDEX_URL -u PIP_EXTRA_INDEX_URL -u PIP_FIND_LINKS -u PIP_NO_INDEX \
+    PIP_CONFIG_FILE=/dev/null \
+    python -m pip wheel --no-cache-dir --index-url https://pypi.org/simple \
+      --wheel-dir "$WHEELHOUSE" --requirement "$REQUIREMENTS"
   (cd -- "$WHEELHOUSE" && sha256sum ./*.whl | LC_ALL=C sort -k2) \
     >"$WHEELHOUSE/SHA256SUMS.tmp"
   mv -f -- "$WHEELHOUSE/SHA256SUMS.tmp" "$WHEELHOUSE/SHA256SUMS"
@@ -132,6 +137,30 @@ for source in "$JAXUED_SOURCE" "$KINETIX_SOURCE"; do
     --no-deps --no-build-isolation --editable "$source"
 done
 "$VENV_DIR/bin/python" -m pip check
+"$VENV_DIR/bin/python" - <<'PY'
+from importlib.metadata import version
+
+expected = {
+    "jax": "0.4.35",
+    "jaxlib": "0.4.34",
+    "jax-cuda12-plugin": "0.4.35",
+    "jax-cuda12-pjrt": "0.4.35",
+}
+for distribution, wanted in expected.items():
+    actual = version(distribution)
+    if actual != wanted:
+        raise RuntimeError(f"{distribution}={actual}, expected exact official wheel {wanted}")
+for distribution in (
+    "nvidia-cublas-cu12",
+    "nvidia-cuda-runtime-cu12",
+    "nvidia-cudnn-cu12",
+    "nvidia-cufft-cu12",
+    "nvidia-cusolver-cu12",
+    "nvidia-cusparse-cu12",
+):
+    print(f"{distribution}={version(distribution)}")
+print("official JAX CUDA runtime wheels: OK")
+PY
 PYTHONPATH="$REPO_ROOT/src" JAX_PLATFORMS=cpu PYTHONNOUSERSITE=1 \
   "$VENV_DIR/bin/python" -m compileall -q "$REPO_ROOT/src/td2_kinetix"
 PYTHONPATH="$REPO_ROOT/src" JAX_PLATFORMS=cpu PYTHONNOUSERSITE=1 \

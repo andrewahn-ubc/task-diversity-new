@@ -544,7 +544,7 @@ cd /home/taegyoem/scratch/task-diversity-new
 git pull --ff-only
 
 bash scripts/setup_kinetix_compute_canada.sh \
-  --runtime-root /scratch/taegyoem/td2-kinetix-runtime \
+  --runtime-root /scratch/taegyoem/td2-kinetix-runtime-official-v2 \
   --data-root /scratch/taegyoem/td2-kinetix-data-7dist
 
 bash scripts/submit_kinetix_continual.sh \
@@ -554,9 +554,11 @@ bash scripts/submit_kinetix_continual.sh \
   --max-concurrent 100
 ```
 
-This submits 17 Slurm job IDs: a 22-element filtered-data array, a GPU smoke
-gate, seven sequential 15-element main arrays, seven 15-element heldout arrays,
-and one aggregate job. Every batch request has a one-hour limit and uses only
+This submits 18 Slurm job IDs: a small CUDA/cuDNN preflight, a 22-element
+filtered-data array, a production GPU smoke gate, seven sequential 15-element
+main arrays, seven 15-element heldout arrays, and one aggregate job. The data
+array cannot start unless the preflight successfully executes a JIT-compiled
+GPU convolution. Every batch request has a one-hour limit and uses only
 `def-krallen`. Long elements atomically checkpoint by 45 minutes and requeue
 the exact array task. If the dependency chain is interrupted, wait until no
 `td2-kinetix*` jobs remain and rerun the submit command with `--resume`.

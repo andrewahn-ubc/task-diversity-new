@@ -1,6 +1,12 @@
 # Kinetix v0.1.0 was released against JAX 0.4.35.  Keep this runtime
 # independent of the newer Banyan/JAX 0.11 environment.
-jax[cuda12]==0.4.35
+# Force the official wheels instead of Alliance's local-version rebuilds.  The
+# latter omit the `with-cuda` dependencies, which leaves the plugin installed
+# without cuDNN/cuBLAS and fails on the first DNN-backed operation.
+jax===0.4.35
+jaxlib===0.4.34
+jax-cuda12-plugin[with-cuda]===0.4.35
+jax-cuda12-pjrt===0.4.35
 numpy==1.26.4
 flax==0.8.5
 optax==0.2.4
