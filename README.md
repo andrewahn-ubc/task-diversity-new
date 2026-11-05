@@ -544,7 +544,7 @@ cd /home/taegyoem/scratch/task-diversity-new
 git pull --ff-only
 
 bash scripts/setup_kinetix_compute_canada.sh \
-  --runtime-root /scratch/taegyoem/td2-kinetix-runtime-official-v3 \
+  --runtime-root /scratch/taegyoem/td2-kinetix-runtime-official-v4 \
   --data-root /scratch/taegyoem/td2-kinetix-data-7dist
 
 bash scripts/submit_kinetix_continual.sh \

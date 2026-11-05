@@ -11,7 +11,7 @@ KINETIX_COMMIT=eed109cb40d777f5ca62eddda134d74d92543870
 # This was JAXUED main when Kinetix v0.1.0 was released (the next JAXUED
 # commit is dated 2025-03-20, after the Kinetix release).
 JAXUED_COMMIT=62d155ae772aa2a0ecac9541d498df7ae88e6def
-RUNTIME_ROOT=/scratch/taegyoem/td2-kinetix-runtime-official-v3
+RUNTIME_ROOT=/scratch/taegyoem/td2-kinetix-runtime-official-v4
 DATA_ROOT=/scratch/taegyoem/td2-kinetix-data-7dist
 
 usage() {
@@ -68,6 +68,7 @@ export PYTHONNOUSERSITE=1
 PYTHON_VERSION=$(python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")')
 [[ $PYTHON_VERSION == 3.11.5 ]] || td2_die \
   "python/3.11.5 module resolved to Python $PYTHON_VERSION"
+[[ -x $VENV_DIR/bin/python ]] || python -m venv "$VENV_DIR"
 
 clone_exact() {
   local name=$1 url=$2 commit=$3 destination=$4 actual dirty
@@ -114,21 +115,57 @@ if [[ ! -f $WHEELHOUSE/.download-complete ]]; then
   # wheelhouse directly from official PyPI so the exact pins below are honored.
   env -u PIP_INDEX_URL -u PIP_EXTRA_INDEX_URL -u PIP_FIND_LINKS -u PIP_NO_INDEX \
     PIP_CONFIG_FILE=/dev/null \
-    python -m pip wheel --no-cache-dir --index-url https://pypi.org/simple \
-      --wheel-dir "$WHEELHOUSE" --requirement "$REQUIREMENTS"
+    "$VENV_DIR/bin/python" -m pip wheel --no-cache-dir \
+      --index-url https://pypi.org/simple \
+      --wheel-dir "$WHEELHOUSE" \
+      --requirement "$REQUIREMENTS"
   (cd -- "$WHEELHOUSE" && sha256sum ./*.whl | LC_ALL=C sort -k2) \
     >"$WHEELHOUSE/SHA256SUMS.tmp"
   mv -f -- "$WHEELHOUSE/SHA256SUMS.tmp" "$WHEELHOUSE/SHA256SUMS"
   printf '%s\n' "$REQUIREMENTS_HASH" >"$LOCK_STAMP.tmp"
   mv -f -- "$LOCK_STAMP.tmp" "$LOCK_STAMP"
-  printf 'complete\n' >"$WHEELHOUSE/.download-complete.tmp"
-  mv -f -- "$WHEELHOUSE/.download-complete.tmp" "$WHEELHOUSE/.download-complete"
 else
   td2_note "verifying completed Kinetix wheelhouse"
   (cd -- "$WHEELHOUSE" && sha256sum --check --quiet SHA256SUMS)
 fi
 
-[[ -x $VENV_DIR/bin/python ]] || python -m venv "$VENV_DIR"
+# Direct NVIDIA requirements above are paired with an explicit offline-bundle
+# audit: never write or trust a complete marker unless every CUDA runtime
+# dependency needed on a compute node exists as an actual wheel here.
+"$VENV_DIR/bin/python" - "$WHEELHOUSE" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+root = Path(sys.argv[1])
+normalize = lambda value: re.sub(r"[-_.]+", "-", value).lower()
+found = {normalize(path.name.split("-", 1)[0]) for path in root.glob("*.whl")}
+required = {
+    "jax",
+    "jaxlib",
+    "jax-cuda12-plugin",
+    "jax-cuda12-pjrt",
+    "nvidia-cublas-cu12",
+    "nvidia-cuda-cupti-cu12",
+    "nvidia-cuda-nvcc-cu12",
+    "nvidia-cuda-runtime-cu12",
+    "nvidia-cudnn-cu12",
+    "nvidia-cufft-cu12",
+    "nvidia-cusolver-cu12",
+    "nvidia-cusparse-cu12",
+    "nvidia-nccl-cu12",
+    "nvidia-nvjitlink-cu12",
+}
+missing = sorted(required - found)
+if missing:
+    raise SystemExit("incomplete offline wheelhouse; missing: " + ", ".join(missing))
+print(f"offline JAX/CUDA wheelhouse: OK ({len(required)} required distributions)")
+PY
+if [[ ! -f $WHEELHOUSE/.download-complete ]]; then
+  printf 'complete\n' >"$WHEELHOUSE/.download-complete.tmp"
+  mv -f -- "$WHEELHOUSE/.download-complete.tmp" "$WHEELHOUSE/.download-complete"
+fi
+
 td2_note "installing Kinetix runtime strictly from the local wheelhouse"
 env -u PIP_INDEX_URL -u PIP_EXTRA_INDEX_URL -u PIP_FIND_LINKS -u PIP_NO_INDEX \
   PIP_CONFIG_FILE=/dev/null \
@@ -149,23 +186,21 @@ expected = {
     "jaxlib": "0.4.34",
     "jax-cuda12-plugin": "0.4.35",
     "jax-cuda12-pjrt": "0.4.35",
+    "nvidia-cublas-cu12": "12.1.3.1",
+    "nvidia-cuda-cupti-cu12": "12.1.105",
+    "nvidia-cuda-nvcc-cu12": "12.1.105",
+    "nvidia-cuda-runtime-cu12": "12.1.105",
+    "nvidia-cudnn-cu12": "9.1.1.17",
+    "nvidia-cufft-cu12": "11.0.2.54",
+    "nvidia-cusolver-cu12": "11.4.5.107",
+    "nvidia-cusparse-cu12": "12.1.0.106",
+    "nvidia-nccl-cu12": "2.18.1",
+    "nvidia-nvjitlink-cu12": "12.1.105",
 }
 for distribution, wanted in expected.items():
     actual = version(distribution)
     if actual != wanted:
         raise RuntimeError(f"{distribution}={actual}, expected exact official wheel {wanted}")
-for distribution in (
-    "nvidia-cublas-cu12",
-    "nvidia-cuda-runtime-cu12",
-    "nvidia-cudnn-cu12",
-    "nvidia-cufft-cu12",
-    "nvidia-cusolver-cu12",
-    "nvidia-cusparse-cu12",
-):
-    actual = version(distribution)
-    if "+" in actual:
-        raise RuntimeError(f"{distribution}={actual}, expected official wheel")
-    print(f"{distribution}={actual}")
 print("official JAX CUDA runtime wheels: OK")
 PY
 PYTHONPATH="$REPO_ROOT/src" JAX_PLATFORMS=cpu PYTHONNOUSERSITE=1 \
